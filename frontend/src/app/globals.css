@@ -1,0 +1,273 @@
+@import 'tailwindcss/base';
+@import 'tailwindcss/components';
+@import 'tailwindcss/utilities';
+
+/* Import Premium Fonts */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: #05070A;
+  color: #ffffff;
+  overflow-x: hidden;
+}
+
+code {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 0.875rem;
+  letter-spacing: 0.5px;
+}
+
+/* ========== SCROLLBAR STYLING ========== */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0a0e14;
+}
+
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #00F2FF 0%, #00D9FF 100%);
+  border-radius: 5px;
+  border: 2px solid #0a0e14;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, #33FFFF 0%, #00F2FF 100%);
+  box-shadow: 0 0 15px rgba(0, 242, 255, 0.3);
+}
+
+/* ========== GLASSMORPHISM ========== */
+.glassmorphism {
+  background: rgba(15, 20, 25, 0.7);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(0, 242, 255, 0.2);
+}
+
+.glassmorphism-strong {
+  background: rgba(15, 20, 25, 0.85);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(0, 242, 255, 0.3);
+}
+
+/* ========== GRADIENT EFFECTS ========== */
+.gradient-neon {
+  background: linear-gradient(135deg, #00F2FF 0%, #00D9FF 100%);
+}
+
+.gradient-danger {
+  background: linear-gradient(135deg, #FF006E 0%, #FF1493 100%);
+}
+
+.gradient-success {
+  background: linear-gradient(135deg, #00DC82 0%, #00FF88 100%);
+}
+
+/* ========== GLOW EFFECTS ========== */
+.glow-primary {
+  box-shadow: 0 0 20px rgba(0, 242, 255, 0.3);
+}
+
+.glow-primary-lg {
+  box-shadow: 0 0 40px rgba(0, 242, 255, 0.4);
+}
+
+.glow-danger {
+  box-shadow: 0 0 20px rgba(255, 0, 110, 0.3);
+}
+
+/* ========== PULSING BORDERS ========== */
+.pulse-border {
+  animation: pulse-border 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes pulse-border {
+  0%, 100% {
+    border-color: rgba(0, 242, 255, 0.3);
+    box-shadow: 0 0 15px rgba(0, 242, 255, 0.2);
+  }
+  50% {
+    border-color: rgba(0, 242, 255, 0.7);
+    box-shadow: 0 0 30px rgba(0, 242, 255, 0.4);
+  }
+}
+
+/* ========== ANIMATIONS ========== */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideInLeft {
+  from {
+    opacity: 0;
+    transform: translateX(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes slideInRight {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes slideInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes float {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+
+.fade-in {
+  animation: fadeIn 0.4s ease-out;
+}
+
+.slide-in-left {
+  animation: slideInLeft 0.4s ease-out;
+}
+
+.slide-in-right {
+  animation: slideInRight 0.4s ease-out;
+}
+
+.slide-in-up {
+  animation: slideInUp 0.4s ease-out;
+}
+
+.float {
+  animation: float 3s ease-in-out infinite;
+}
+
+/* ========== COMPONENTS ========== */
+
+/* Premium Button */
+.btn-primary {
+  @apply px-4 py-2 rounded-lg font-medium transition-all duration-300;
+  background: linear-gradient(135deg, #00F2FF 0%, #00D9FF 100%);
+  color: #05070A;
+  box-shadow: 0 0 20px rgba(0, 242, 255, 0.2);
+}
+
+.btn-primary:hover {
+  box-shadow: 0 0 40px rgba(0, 242, 255, 0.4);
+  transform: translateY(-2px);
+}
+
+.btn-primary:active {
+  transform: translateY(0);
+}
+
+/* Secondary Button */
+.btn-secondary {
+  @apply px-4 py-2 rounded-lg font-medium transition-all duration-300;
+  background: rgba(0, 242, 255, 0.1);
+  color: #00F2FF;
+  border: 1px solid rgba(0, 242, 255, 0.3);
+}
+
+.btn-secondary:hover {
+  background: rgba(0, 242, 255, 0.2);
+  box-shadow: 0 0 20px rgba(0, 242, 255, 0.2);
+  border-color: #00F2FF;
+}
+
+/* Danger Button */
+.btn-danger {
+  @apply px-4 py-2 rounded-lg font-medium transition-all duration-300;
+  background: rgba(255, 0, 110, 0.1);
+  color: #FF006E;
+  border: 1px solid rgba(255, 0, 110, 0.3);
+}
+
+.btn-danger:hover {
+  background: rgba(255, 0, 110, 0.2);
+  box-shadow: 0 0 20px rgba(255, 0, 110, 0.2);
+  border-color: #FF006E;
+}
+
+/* ========== CARD STYLES ========== */
+.card {
+  @apply rounded-xl glassmorphism p-4 transition-all duration-300;
+}
+
+.card:hover {
+  border-color: rgba(0, 242, 255, 0.5);
+  box-shadow: 0 0 30px rgba(0, 242, 255, 0.2);
+}
+
+.card-active {
+  border-color: #00F2FF;
+  box-shadow: 0 0 40px rgba(0, 242, 255, 0.3);
+}
+
+.card-processing {
+  animation: pulse-border 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* ========== TEXT STYLES ========== */
+.text-gradient-primary {
+  background: linear-gradient(135deg, #00F2FF 0%, #00D9FF 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.text-mono {
+  font-family: 'JetBrains Mono', monospace;
+  letter-spacing: 0.5px;
+}
+
+/* ========== UTILITY CLASSES ========== */
+.border-primary {
+  border-color: rgba(0, 242, 255, 0.3);
+}
+
+.border-primary-strong {
+  border-color: #00F2FF;
+}
+
+.bg-surface {
+  background-color: #0f1419;
+}
+
