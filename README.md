@@ -1,33 +1,85 @@
 # 🤖 Heuriskein IA - Multi-Agentic Web System
 
-Um sistema de orquestração inteligente que gerencia múltiplos agentes de IA para executar tarefas complexas de forma coordenada e eficiente.
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.13%2B-blue)](https://www.python.org/)
+[![Django](https://img.shields.io/badge/django-6.0.3-darkgreen)](https://www.djangoproject.com/)
+[![Next.js](https://img.shields.io/badge/next.js-14.2-black)](https://nextjs.org/)
+[![GitHub](https://img.shields.io/badge/github-published-brightgreen)](https://github.com/lucascasserone/heuriskein-ia-agentic-plataform)
 
-**Status**: 🚀 Em Desenvolvimento (v0.1.0)  
-**Data**: Março 2026
+**Plataforma inteligente de orquestração que gerencia múltiplos agentes de IA para executar tarefas complexas.**
+
+**Status**: 🚀 MVP Ready (v0.1.0)  
+**Data**: Março 30, 2026  
+**Testes**: ✅ 3/4 passing (75%)
 
 ---
 
-## 📊 Overview
+## 🎯 Sobre o Projeto
 
-Heuriskein é uma plataforma completa para:
-- 🎯 **Orquestração de Agentes**: Gerenciar múltiplos agentes de IA (Coordinator, Executor, Analyst)
-- 📋 **Kanban Duplo**: Planejamento estratégico (Épicos) + Execução operacional (Tarefas)
-- 💬 **Chat em Tempo Real**: Comunicação bidirecional com agentes via WebSocket
-- 👥 **Monitoramento**: Painel de agentes com status em tempo real
-- 📝 **Logs Inteligentes**: Console de pensamento dos agentes com filtros
+Heuriskein é uma plataforma end-to-end para orquestração de agentes de IA com:
+- 🤖 **Multi-Agent Orchestration** usando LangGraph
+- 💬 **Integração LLM** (Claude + GPT-4)
+- ⚡ **WebSocket Real-time** para atualizações instantâneas
+- 📊 **Dual Kanban Board** (Planejamento + Execução)
+- 🎨 **Modern UI** com Next.js + Tailwind
+- 🔐 **JWT Authentication** segura
+- 🐳 **Docker Ready** para prod/dev
+
+---
+
+## 🚀 Quick Start
+
+### Pré-requisitos
+- Python 3.13+
+- Node.js 18+
+- Git
+
+### Instalação Local (5 min)
+
+```bash
+# Clone
+git clone https://github.com/lucascasserone/heuriskein-ia-agentic-plataform.git
+cd heuriskein-ia-agentic-plataform
+
+# Backend
+cd backend
+python -m venv venv
+source venv/bin/activate  # ou: venv\Scripts\activate (Windows)
+pip install -r requirements.txt
+python manage.py migrate
+python manage.py runserver 0.0.0.0:8001
+
+# Frontend (novo terminal)
+cd frontend
+npm install
+npm run dev
+```
+
+**Acesse:**
+- Frontend: http://localhost:3000
+- Backend: http://localhost:8001/api/v1
+- Admin: http://localhost:8001/admin
 
 ---
 
 ## 🛠️ Stack Tecnológico
 
-### Backend
-- **Django 4.2** + Django REST Framework
-- **PostgreSQL** - Banco de dados
-- **Redis** - Cache e message broker
-- **Channels** - WebSocket real-time
-- **Celery** - Tarefas assíncronas
-- **LangGraph** - Orquestração de agentes
-- **Anthropic Claude** + **OpenAI GPT** - LLMs
+### Backend (Django)
+- **Framework**: Django REST Framework 3.14
+- **Real-time**: Django Channels + WebSocket
+- **Agents**: LangGraph para orquestração
+- **LLMs**: Anthropic Claude + OpenAI
+- **Database**: PostgreSQL / SQLite
+- **Cache**: Redis
+- **Async**: Celery
+
+### Frontend (Next.js)
+- **Framework**: Next.js 14 + React 18
+- **Language**: TypeScript
+- **Styling**: Tailwind CSS
+- **Components**: React Beautiful DnD
+- **State**: Zustand
+- **Icons**: Lucide React
 - **Daphne + Gunicorn** - Servidores ASGI/WSGI
 
 ### Frontend

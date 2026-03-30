@@ -1,7 +1,16 @@
 # 🚀 Roadmap de Desenvolvimento - Heuriskein IA
 
 **Data:** Março 30, 2026  
-**Status Geral:** 90% Completo (Core + Auth + LLM + WebSocket Real-time Completo)
+**Status Geral:** 95% Completo (MVP Ready - GitHub Published)
+
+---
+
+## 🚀 PUBLICAÇÃO NO GITHUB (30/03/2026) ✅
+
+**Repositório:** https://github.com/lucascasserone/heuriskein-ia-agentic-plataform  
+**Branch:** main  
+**Commit:** af59394 (Initial commit)  
+**Status:** ✅ Sincronizado com sucesso
 
 ---
 
