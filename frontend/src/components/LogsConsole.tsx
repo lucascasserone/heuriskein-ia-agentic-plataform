@@ -87,9 +87,9 @@ function LogEntry({ log }: { log: LogEntry }) {
   const levelColor = logLevelColors[log.level] || logLevelColors.info;
   const levelIcon = logLevelIcons[log.level] || '•';
   const agentName = log.agent_name || log.agent || 'System';
-  const timestamp = log.timestamp
-    ? new Date(log.timestamp).toLocaleTimeString()
-    : new Date().toLocaleTimeString();
+  const timestamp = log.timestamp?.includes('T')
+    ? log.timestamp.slice(11, 19)
+    : '--:--:--';
 
   return (
     <div className={`${levelColor} break-words`}>

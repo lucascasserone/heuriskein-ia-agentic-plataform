@@ -132,7 +132,8 @@ class EpicViewSet(viewsets.ModelViewSet):
     
     def perform_create(self, serializer):
         """Salvar epic com usuário atual"""
-        serializer.save(created_by=self.request.user)
+        user = self.request.user if self.request.user.is_authenticated else None
+        serializer.save(created_by=user)
     
     @action(detail=True, methods=['get'])
     def tasks(self, request, pk=None):
@@ -181,6 +182,15 @@ class TaskViewSet(viewsets.ModelViewSet):
             state='idle',
             capabilities__icontains=request.data.get('capability', '')
         )
+
+        if not available_agents.exists() and not Agent.objects.exists():
+            Agent.objects.create(
+                name='Executor Padrão',
+                type='executor',
+                model='claude-3-5-sonnet-20241022',
+                capabilities=['general', 'execution', 'analysis']
+            )
+            available_agents = Agent.objects.filter(state='idle')
         
         if not available_agents.exists():
             return Response(
@@ -282,6 +292,15 @@ class ChatAPIView(APIView):
         stream = serializer.validated_data.get('stream', False)
         
         try:
+            chat_user = request.user if request.user.is_authenticated else User.objects.first()
+
+            if chat_user is None:
+                chat_user = User.objects.create_user(
+                    username='guest_chat',
+                    email='guest-chat@local',
+                    password=User.objects.make_random_password()
+                )
+
             # Get or create agent
             agent_id = request.data.get('agent_id')
             try:
@@ -300,21 +319,33 @@ class ChatAPIView(APIView):
             ]
             
             # Get LLM service and generate response
-            llm_service = get_llm_service()
+            llm_service = None
+            try:
+                llm_service = get_llm_service()
+            except Exception:
+                llm_service = None
+
+            fallback_response = (
+                'LLM indisponivel no momento. Configure ANTHROPIC_API_KEY ou OPENAI_API_KEY para respostas inteligentes.'
+            )
             
             if stream:
                 # Streaming response (SSE - Server-Sent Events)
                 def event_generator():
                     try:
                         response_text = ""
-                        for chunk in llm_service.stream_chat(messages, system_prompt):
-                            response_text += chunk
-                            yield f"data: {chunk}\n\n"
+                        if llm_service is None:
+                            response_text = fallback_response
+                            yield f"data: {fallback_response}\n\n"
+                        else:
+                            for chunk in llm_service.stream_chat(messages, system_prompt):
+                                response_text += chunk
+                                yield f"data: {chunk}\n\n"
                         
                         # Save chat message after streaming
                         ChatMessage.objects.create(
                             agent=agent,
-                            user=request.user if request.user.is_authenticated else None,
+                            user=chat_user,
                             user_message=user_message,
                             agent_response=response_text,
                             context={**context, 'streaming': True}
@@ -329,12 +360,12 @@ class ChatAPIView(APIView):
                 )
             else:
                 # Non-streaming response
-                agent_response = llm_service.chat(messages, system_prompt)
+                agent_response = llm_service.chat(messages, system_prompt) if llm_service else fallback_response
                 
                 # Save chat message
                 chat_message = ChatMessage.objects.create(
                     agent=agent,
-                    user=request.user if request.user.is_authenticated else None,
+                    user=chat_user,
                     user_message=user_message,
                     agent_response=agent_response,
                     context=context

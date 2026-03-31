@@ -1,5 +1,4 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
-import { useAppStore } from '@/store/appStore';
 
 interface WebSocketMessage {
   type: string;
@@ -28,7 +27,14 @@ export function useWebRealtime(
   const [isConnected, setIsConnected] = useState(false);
   const handlersRef = useRef<Map<string, Set<MessageHandler>>>(new Map());
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const accessToken = useAppStore((state) => state.accessToken);
+  const {
+    url,
+    onConnect,
+    onDisconnect,
+    onError,
+    autoReconnect = true,
+    reconnectInterval = 5000,
+  } = options;
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -36,12 +42,12 @@ export function useWebRealtime(
     }
 
     try {
-      const ws = new WebSocket(options.url);
+      const ws = new WebSocket(url);
 
       ws.onopen = () => {
         setIsConnected(true);
-        options.onConnect?.();
-        console.log(`✅ Connected to ${options.url}`);
+        onConnect?.();
+        console.log(`✅ Connected to ${url}`);
       };
 
       ws.onmessage = (event) => {
@@ -79,17 +85,17 @@ export function useWebRealtime(
 
       ws.onerror = (error) => {
         console.error('WebSocket error:', error);
-        options.onError?.(`WebSocket error at ${options.url}`);
+        onError?.(`WebSocket error at ${url}`);
       };
 
       ws.onclose = () => {
         setIsConnected(false);
-        options.onDisconnect?.();
-        console.log(`❌ Disconnected from ${options.url}`);
+        onDisconnect?.();
+        console.log(`❌ Disconnected from ${url}`);
 
         // Auto-reconnect
-        if (options.autoReconnect !== false) {
-          const interval = options.reconnectInterval || 5000;
+        if (autoReconnect) {
+          const interval = reconnectInterval;
           reconnectTimeoutRef.current = setTimeout(() => {
             console.log('🔄 Attempting to reconnect...');
             connect();
@@ -100,9 +106,9 @@ export function useWebRealtime(
       wsRef.current = ws;
     } catch (error) {
       console.error('Error creating WebSocket:', error);
-      options.onError?.(`Failed to connect to ${options.url}`);
+      onError?.(`Failed to connect to ${url}`);
     }
-  }, [options]);
+  }, [autoReconnect, onConnect, onDisconnect, onError, reconnectInterval, url]);
 
   const send = useCallback((message: WebSocketMessage) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -161,13 +167,14 @@ export function useWebRealtime(
  * Hook for real-time task updates
  */
 export function useTaskRealtime() {
-  const wsUrl = `${typeof window !== 'undefined' ? window.location.protocol === 'https:' ? 'wss' : 'ws' : 'ws'}://${typeof window !== 'undefined' ? window.location.host : 'localhost:8001'}/ws/tasks/`;
+  const wsBase =
+    process.env.NEXT_PUBLIC_WS_URL ||
+    `${typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws'}://localhost:8001/ws`;
+  const wsUrl = `${wsBase.replace(/\/$/, '')}/tasks/`;
 
   return useWebRealtime({
     url: wsUrl,
-    onConnect: () => console.log('Connected to task updates'),
-    onError: (error) => console.error('Task WS error:', error),
-    autoReconnect: true,
+    autoReconnect: false,
   });
 }
 
@@ -175,13 +182,14 @@ export function useTaskRealtime() {
  * Hook for real-time agent updates
  */
 export function useAgentRealtime() {
-  const wsUrl = `${typeof window !== 'undefined' ? window.location.protocol === 'https:' ? 'wss' : 'ws' : 'ws'}://${typeof window !== 'undefined' ? window.location.host : 'localhost:8001'}/ws/agents/`;
+  const wsBase =
+    process.env.NEXT_PUBLIC_WS_URL ||
+    `${typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws'}://localhost:8001/ws`;
+  const wsUrl = `${wsBase.replace(/\/$/, '')}/agents/`;
 
   return useWebRealtime({
     url: wsUrl,
-    onConnect: () => console.log('Connected to agent updates'),
-    onError: (error) => console.error('Agent WS error:', error),
-    autoReconnect: true,
+    autoReconnect: false,
   });
 }
 
@@ -189,13 +197,14 @@ export function useAgentRealtime() {
  * Hook for real-time epic updates
  */
 export function useEpicRealtime() {
-  const wsUrl = `${typeof window !== 'undefined' ? window.location.protocol === 'https:' ? 'wss' : 'ws' : 'ws'}://${typeof window !== 'undefined' ? window.location.host : 'localhost:8001'}/ws/epics/`;
+  const wsBase =
+    process.env.NEXT_PUBLIC_WS_URL ||
+    `${typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws'}://localhost:8001/ws`;
+  const wsUrl = `${wsBase.replace(/\/$/, '')}/epics/`;
 
   return useWebRealtime({
     url: wsUrl,
-    onConnect: () => console.log('Connected to epic updates'),
-    onError: (error) => console.error('Epic WS error:', error),
-    autoReconnect: true,
+    autoReconnect: false,
   });
 }
 
@@ -203,12 +212,13 @@ export function useEpicRealtime() {
  * Hook for real-time thought logs
  */
 export function useThoughtLogsRealtime() {
-  const wsUrl = `${typeof window !== 'undefined' ? window.location.protocol === 'https:' ? 'wss' : 'ws' : 'ws'}://${typeof window !== 'undefined' ? window.location.host : 'localhost:8001'}/ws/logs/`;
+  const wsBase =
+    process.env.NEXT_PUBLIC_WS_URL ||
+    `${typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws'}://localhost:8001/ws`;
+  const wsUrl = `${wsBase.replace(/\/$/, '')}/logs/`;
 
   return useWebRealtime({
     url: wsUrl,
-    onConnect: () => console.log('Connected to thought logs'),
-    onError: (error) => console.error('Logs WS error:', error),
-    autoReconnect: true,
+    autoReconnect: false,
   });
 }

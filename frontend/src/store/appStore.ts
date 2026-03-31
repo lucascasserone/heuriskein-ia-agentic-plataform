@@ -1,5 +1,4 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
 
 interface User {
   id: number;
@@ -23,15 +22,19 @@ interface AuthState {
   setLoginModalOpen: (open: boolean) => void;
   logout: () => void;
 }
+
+interface TaskState {
+  id: string;
   title: string;
   description: string;
-  epic_id: string | null;
+  epic: string | null;
   status: 'queue' | 'processing' | 'review' | 'completed' | 'failed';
   priority: 'low' | 'medium' | 'high';
   assigned_to: string | null;
 }
 
 interface EpicState {
+  id: string;
   goal: string;
   description: string;
   status: 'backlog' | 'refinement' | 'approved' | 'completed' | 'failed';

@@ -14,6 +14,7 @@ interface Message {
 }
 
 export default function LLMChatInterface() {
+  const [isMounted, setIsMounted] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
     {
       id: '1',
@@ -34,6 +35,15 @@ export default function LLMChatInterface() {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
+  const formatTime = (date: Date) =>
+    date.toLocaleTimeString('pt-BR', {
+      hour12: false,
+    });
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -141,7 +151,7 @@ export default function LLMChatInterface() {
                 {msg.content || (msg.isStreaming && <Loader className="w-4 h-4 animate-spin inline" />)}
               </div>
               <div className="text-xs text-gray-light mt-1">
-                {msg.timestamp.toLocaleTimeString()}
+                {isMounted ? formatTime(msg.timestamp) : '--:--:--'}
               </div>
             </div>
           </div>

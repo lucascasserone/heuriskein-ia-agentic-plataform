@@ -2,8 +2,6 @@
 
 import React, { useState } from 'react';
 import {
-  Menu,
-  X,
   Home,
   Zap,
   MessageSquare,
@@ -14,6 +12,8 @@ import {
   BarChart3,
 } from 'lucide-react';
 import { useAppStore } from '@/store/appStore';
+import CreateEpicModal from '@/components/Modals/CreateEpicModal';
+import CreateTaskModal from '@/components/Modals/CreateTaskModal';
 
 interface SidebarProps {
   onCreateEpic?: () => void;
@@ -21,10 +21,8 @@ interface SidebarProps {
 }
 
 export default function Sidebar({ onCreateEpic, onCreateTask }: SidebarProps) {
-  const [sidebarOpen, setSidebarOpen] = useAppStore((state) => [
-    state.sidebarOpen,
-    state.setSidebarOpen,
-  ]);
+  const [isCreateEpicOpen, setIsCreateEpicOpen] = useState(false);
+  const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(false);
   
   const isAuthenticated = useAppStore((state) => state.isAuthenticated);
   const user = useAppStore((state) => state.user);
@@ -43,30 +41,26 @@ export default function Sidebar({ onCreateEpic, onCreateTask }: SidebarProps) {
     analyst: { name: 'Analista', active: 0, capacity: 2 },
   });
 
+  const openCreateEpic = () => {
+    setIsCreateEpicOpen(true);
+    onCreateEpic?.();
+  };
+
+  const openCreateTask = () => {
+    setIsCreateTaskOpen(true);
+    onCreateTask?.();
+  };
+
+  const handleModalSuccess = () => {
+    window.dispatchEvent(new CustomEvent('kanban:refresh'));
+  };
+
   return (
     <>
-      {/* Mobile Menu Button */}
-      <button
-        onClick={() => setSidebarOpen(!sidebarOpen)}
-        className="md:hidden absolute top-4 left-4 z-50 p-2 bg-surface-alt rounded-lg transition-all hover:bg-surface"
-      >
-        {sidebarOpen ? <X size={24} className="text-primary" /> : <Menu size={24} className="text-primary" />}
-      </button>
-
-      {/* Sidebar Overlay (Mobile) */}
-      {sidebarOpen && (
-        <div
-          className="md:hidden fixed inset-0 bg-black/50 z-40"
-          onClick={() => setSidebarOpen(false)}
-        />
-      )}
-
       {/* Sidebar */}
       <aside
         className={`
-          w-80 bg-darker border-r border-primary/10 flex flex-col transition-all duration-300
-          ${!sidebarOpen ? '-translate-x-full md:translate-x-0' : ''}
-          md:relative md:translate-x-0 z-40
+          w-80 shrink-0 bg-darker border-r border-primary/10 flex flex-col relative z-10
         `}
       >
         {/* ===== HEADER ===== */}
@@ -85,7 +79,8 @@ export default function Sidebar({ onCreateEpic, onCreateTask }: SidebarProps) {
         {/* ===== QUICK ACTIONS ===== */}
         <div className="p-4 border-b border-primary/10 space-y-2">
           <button
-            onClick={onCreateEpic}
+            type="button"
+            onClick={openCreateEpic}
             className="
               w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg
               bg-primary text-dark font-bold text-sm
@@ -99,7 +94,8 @@ export default function Sidebar({ onCreateEpic, onCreateTask }: SidebarProps) {
             + Nova Épica
           </button>
           <button
-            onClick={onCreateTask}
+            type="button"
+            onClick={openCreateTask}
             className="
               w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg
               bg-success text-dark font-bold text-sm
@@ -202,6 +198,18 @@ export default function Sidebar({ onCreateEpic, onCreateTask }: SidebarProps) {
           )}
         </div>
       </aside>
+
+      <CreateEpicModal
+        isOpen={isCreateEpicOpen}
+        onClose={() => setIsCreateEpicOpen(false)}
+        onSuccess={handleModalSuccess}
+      />
+
+      <CreateTaskModal
+        isOpen={isCreateTaskOpen}
+        onClose={() => setIsCreateTaskOpen(false)}
+        onSuccess={handleModalSuccess}
+      />
     </>
   );
 }

@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { useAppStore } from '@/store/appStore';
-import { messageCircle, Send } from 'lucide-react';
+import { MessageCircle, Send } from 'lucide-react';
 
 interface Message {
   id: string;
@@ -56,7 +56,7 @@ export default function ChatPanel() {
     <div className="flex flex-col h-full">
       {/* Chat Header */}
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-700">
-        <messageCircle size={20} className="text-accent" />
+        <MessageCircle size={20} className="text-accent" />
         <p className="font-medium">Chat com Agente</p>
       </div>
 

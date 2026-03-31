@@ -4,15 +4,14 @@ import React, { useEffect, useState } from 'react';
 import { Reorder, motion, AnimatePresence } from 'framer-motion';
 import { useAppStore } from '@/store/appStore';
 import { apiClient } from '@/lib/api';
-import { useTaskRealtime, useEpicRealtime } from '@/hooks/useWebRealtime';
 import { LayoutGrid, Zap, CheckCircle2, Clock, AlertCircle, User, Timer, Eye, EyeOff } from 'lucide-react';
 import { useNotify } from '@/lib/toast';
 
 interface Task {
   id: string;
   title: string;
-  status: string;
-  priority: string;
+  status: 'queue' | 'processing' | 'review' | 'completed' | 'failed';
+  priority: 'low' | 'medium' | 'high';
   assigned_to?: string;
   epic?: string;
   created_at?: string;
@@ -21,10 +20,13 @@ interface Task {
 interface Epic {
   id: string;
   goal: string;
-  status: string;
-  priority: string;
+  status: 'backlog' | 'refinement' | 'approved' | 'completed' | 'failed';
+  priority: 'low' | 'medium' | 'high';
   created_at?: string;
 }
+
+type TaskStatus = Task['status'];
+type EpicStatus = Epic['status'];
 
 // Planning Board (Epics) - Blueprint Style
 const planningStatuses = [
@@ -62,97 +64,93 @@ export default function DualKanbanDragDrop() {
   const [loading, setLoading] = useState(true);
   const [showFlowGraph, setShowFlowGraph] = useState(false);
   const notify = useNotify();
-  
-  // WebSocket for real-time updates
-  const taskWs = useTaskRealtime();
-  const epicWs = useEpicRealtime();
 
   useEffect(() => {
-    fetchData();
+    let isActive = true;
+
+    const initData = async () => {
+      const loadingGuard = window.setTimeout(() => {
+        if (isActive) {
+          setLoading(false);
+          notify.error('Tempo de carregamento excedido. Exibindo dados disponíveis.');
+        }
+      }, 10000);
+
+      try {
+        await fetchData();
+      } finally {
+        window.clearTimeout(loadingGuard);
+        if (isActive) {
+          setLoading(false);
+        }
+      }
+    };
+
+    initData();
+
+    return () => {
+      isActive = false;
+    };
   }, []);
 
-  // Subscribe to task updates via WebSocket
   useEffect(() => {
-    const unsubscribeTasks = taskWs.subscribe('task_updated', (message) => {
-      console.log('📡 Task update received:', message);
-      // Re-fetch data to get updated list
+    const refreshHandler = () => {
       fetchData();
-    });
+    };
 
-    const unsubscribeList = taskWs.subscribe('task_list', (message) => {
-      console.log('📡 Task list received:', message);
-      if (message.tasks) {
-        // Group tasks by status
-        const groupedTasks: { [key: string]: Task[] } = {};
-        message.tasks.forEach((task: Task) => {
-          const status = task.status || 'queue';
-          if (!groupedTasks[status]) groupedTasks[status] = [];
-          groupedTasks[status].push(task);
-        });
-        setTasks(groupedTasks);
-      }
-    });
+    window.addEventListener('kanban:refresh', refreshHandler);
+    const interval = window.setInterval(refreshHandler, 15000);
 
     return () => {
-      unsubscribeTasks();
-      unsubscribeList();
+      window.removeEventListener('kanban:refresh', refreshHandler);
+      window.clearInterval(interval);
     };
-  }, [taskWs]);
+  }, []);
 
-  // Subscribe to epic updates via WebSocket
-  useEffect(() => {
-    const unsubscribeEpics = epicWs.subscribe('epic_updated', (message) => {
-      console.log('📡 Epic update received:', message);
-      fetchData();
-    });
+  const withTimeout = async <T,>(promise: Promise<T>, ms: number): Promise<T> => {
+    return new Promise<T>((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        reject(new Error('Request timeout'));
+      }, ms);
 
-    const unsubscribeList = epicWs.subscribe('epics_list', (message) => {
-      console.log('📡 Epic list received:', message);
-      if (message.epics) {
-        const groupedEpics: { [key: string]: Epic[] } = {};
-        message.epics.forEach((epic: Epic) => {
-          const status = epic.status || 'backlog';
-          if (!groupedEpics[status]) groupedEpics[status] = [];
-          groupedEpics[status].push(epic);
+      promise
+        .then((value) => {
+          window.clearTimeout(timer);
+          resolve(value);
+        })
+        .catch((error) => {
+          window.clearTimeout(timer);
+          reject(error);
         });
-        setEpics(groupedEpics);
-      }
     });
-
-    return () => {
-      unsubscribeEpics();
-      unsubscribeList();
-    };
-  }, [epicWs]);
+  };
 
   const fetchData = async () => {
     try {
       const [epicsRes, tasksRes] = await Promise.all([
-        apiClient.getEpicsByStatus(),
-        apiClient.getTasksByStatus(),
+        withTimeout(apiClient.getEpicsByStatus(), 8000),
+        withTimeout(apiClient.getTasksByStatus(), 8000),
       ]);
       setEpics(epicsRes.data || {});
       setTasks(tasksRes.data || {});
     } catch (error) {
       console.error('Error fetching data:', error);
       notify.error('Erro ao carregar dados');
-    } finally {
-      setLoading(false);
     }
   };
 
   const handleDragEnd = async (
     item: Epic | Task,
-    newStatus: string,
+    newStatus: TaskStatus | EpicStatus,
     type: 'epic' | 'task'
   ) => {
     try {
       notify.loading('Atualizando status...');
 
       if (type === 'epic') {
-        await apiClient.updateEpic(item.id, { status: newStatus });
+        await apiClient.updateEpic(item.id, { status: newStatus as EpicStatus });
       } else {
-        await apiClient.updateTask(item.id, { status: newStatus });
+        await apiClient.updateTask(item.id, { status: newStatus as TaskStatus });
       }
 
       notify.success(`Status atualizado para "${newStatus}"`);
@@ -163,21 +161,51 @@ export default function DualKanbanDragDrop() {
     }
   };
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <div className="text-center">
-          <div className="animate-spin mb-4">
-            <Zap className="text-primary mx-auto" size={32} />
-          </div>
-          <p className="text-gray-light">Carregando dados...</p>
-        </div>
-      </div>
-    );
-  }
+  const handleStatusChange = async (
+    item: Task | Epic,
+    newStatus: TaskStatus | EpicStatus,
+    type: 'task' | 'epic'
+  ) => {
+    try {
+      if (type === 'task') {
+        await apiClient.updateTask(item.id, { status: newStatus as TaskStatus });
+      } else {
+        await apiClient.updateEpic(item.id, { status: newStatus as EpicStatus });
+      }
+      await fetchData();
+    } catch (error) {
+      console.error('Error updating status:', error);
+      notify.error('Erro ao alterar status');
+    }
+  };
+
+  const handleTaskAction = async (task: Task, action: 'execute' | 'complete' | 'fail') => {
+    try {
+      if (action === 'execute') {
+        await apiClient.executeTask(task.id);
+      } else if (action === 'complete') {
+        await apiClient.completeTask(task.id, { completed_by: 'ui' });
+      } else {
+        await apiClient.failTask(task.id, 'Falha registrada via UI');
+      }
+
+      await fetchData();
+      notify.success('Tarefa atualizada com sucesso');
+    } catch (error: any) {
+      const detail = error?.response?.data?.error || 'Não foi possível executar a ação';
+      notify.error(detail);
+    }
+  };
 
   return (
     <div className="p-4 lg:p-5 h-full flex flex-col bg-dark overflow-hidden">
+      {loading && (
+        <div className="mb-3 text-xs text-gray-light flex items-center gap-2">
+          <span className="inline-block w-2 h-2 rounded-full bg-primary animate-pulse" />
+          <span>Carregando dados...</span>
+        </div>
+      )}
+
       {/* Header */}
       <div className="mb-4 lg:mb-5">
         <div className="flex items-center justify-between mb-2">
@@ -211,7 +239,7 @@ export default function DualKanbanDragDrop() {
 
       {/* Kanban or Flow Graph - Toggle View */}
       {!showFlowGraph ? (
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 lg:gap-6 flex-1 overflow-hidden">
+      <div className="flex flex-col gap-4 lg:gap-6 flex-1 overflow-hidden">
         {/* PLANNING BOARD - Blueprint Style */}
         <div className="flex flex-col min-h-0">
           <div className="flex items-center gap-2 mb-3 lg:mb-4 pb-2 lg:pb-3 border-b border-primary/20">
@@ -234,7 +262,7 @@ export default function DualKanbanDragDrop() {
                 items={epics[key] || []}
                 type="epic"
                 cardStyle="blueprint"
-                onDragEnd={(item) => handleDragEnd(item, key, 'epic')}
+                onDragEnd={(item) => handleDragEnd(item, key as EpicStatus, 'epic')}
               />
             ))}
           </div>
@@ -262,7 +290,7 @@ export default function DualKanbanDragDrop() {
                 items={tasks[key] || []}
                 type="task"
                 cardStyle="vivo"
-                onDragEnd={(item) => handleDragEnd(item, key, 'task')}
+                onDragEnd={(item) => handleDragEnd(item, key as TaskStatus, 'task')}
               />
             ))}
           </div>
@@ -363,6 +391,8 @@ function KanbanColumnWithDragDrop({
                     type={type} 
                     status={status} 
                     cardStyle={cardStyle}
+                    onStatusChange={handleStatusChange}
+                    onTaskAction={handleTaskAction}
                   />
                 </Reorder.Item>
               ))
@@ -379,9 +409,11 @@ interface CardProps {
   type: 'epic' | 'task';
   status: string;
   cardStyle: 'blueprint' | 'vivo';
+  onStatusChange: (item: Task | Epic, newStatus: TaskStatus | EpicStatus, type: 'task' | 'epic') => Promise<void>;
+  onTaskAction: (task: Task, action: 'execute' | 'complete' | 'fail') => Promise<void>;
 }
 
-function DragDropCard({ item, type, status, cardStyle }: CardProps) {
+function DragDropCard({ item, type, status, cardStyle, onStatusChange, onTaskAction }: CardProps) {
   const title = 'goal' in item ? item.goal : item.title;
   const priority = item.priority || 'medium';
   const colors = priorityColors[priority as keyof typeof priorityColors];
@@ -404,6 +436,9 @@ function DragDropCard({ item, type, status, cardStyle }: CardProps) {
   const hoverEffect = cardStyle === 'blueprint'
     ? 'hover:shadow-glow-primary hover:border-primary/60'
     : 'hover:shadow-glow-primary hover:border-secondary/60';
+
+  const taskStatusOptions: TaskStatus[] = ['queue', 'processing', 'review', 'completed', 'failed'];
+  const epicStatusOptions: EpicStatus[] = ['backlog', 'refinement', 'approved', 'completed', 'failed'];
 
   return (
     <motion.div
@@ -490,6 +525,60 @@ function DragDropCard({ item, type, status, cardStyle }: CardProps) {
           <span className="font-mono">~5min</span>
         </motion.div>
       )}
+
+      <div className="pt-2 mt-2 border-t border-gray-metallic/20 flex flex-col gap-2">
+        {type === 'task' ? (
+          <select
+            value={(item as Task).status}
+            onChange={(e) => onStatusChange(item, e.target.value as TaskStatus, 'task')}
+            className="bg-black/40 border border-gray-metallic/40 rounded text-xs px-2 py-1 text-gray-lighter"
+          >
+            {taskStatusOptions.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <select
+            value={(item as Epic).status}
+            onChange={(e) => onStatusChange(item, e.target.value as EpicStatus, 'epic')}
+            className="bg-black/40 border border-gray-metallic/40 rounded text-xs px-2 py-1 text-gray-lighter"
+          >
+            {epicStatusOptions.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
+          </select>
+        )}
+
+        {type === 'task' && (item as Task).status === 'queue' && (
+          <button
+            onClick={() => onTaskAction(item as Task, 'execute')}
+            className="text-xs px-2 py-1 rounded bg-primary/20 border border-primary/40 text-primary hover:bg-primary/30"
+          >
+            Executar
+          </button>
+        )}
+
+        {type === 'task' && (item as Task).status === 'processing' && (
+          <div className="flex gap-2">
+            <button
+              onClick={() => onTaskAction(item as Task, 'complete')}
+              className="flex-1 text-xs px-2 py-1 rounded bg-green-500/20 border border-green-500/40 text-green-300 hover:bg-green-500/30"
+            >
+              Concluir
+            </button>
+            <button
+              onClick={() => onTaskAction(item as Task, 'fail')}
+              className="flex-1 text-xs px-2 py-1 rounded bg-red-500/20 border border-red-500/40 text-red-300 hover:bg-red-500/30"
+            >
+              Falhar
+            </button>
+          </div>
+        )}
+      </div>
     </motion.div>
   );
 }
