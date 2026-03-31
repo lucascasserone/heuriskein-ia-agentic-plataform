@@ -263,6 +263,8 @@ export default function DualKanbanDragDrop() {
                 type="epic"
                 cardStyle="blueprint"
                 onDragEnd={(item) => handleDragEnd(item, key as EpicStatus, 'epic')}
+                onStatusChange={handleStatusChange}
+                onTaskAction={handleTaskAction}
               />
             ))}
           </div>
@@ -291,6 +293,8 @@ export default function DualKanbanDragDrop() {
                 type="task"
                 cardStyle="vivo"
                 onDragEnd={(item) => handleDragEnd(item, key as TaskStatus, 'task')}
+                onStatusChange={handleStatusChange}
+                onTaskAction={handleTaskAction}
               />
             ))}
           </div>
@@ -322,6 +326,8 @@ interface ColumnProps {
   type: 'epic' | 'task';
   cardStyle: 'blueprint' | 'vivo';
   onDragEnd: (item: Task | Epic) => void;
+  onStatusChange: (item: Task | Epic, newStatus: TaskStatus | EpicStatus, type: 'task' | 'epic') => Promise<void>;
+  onTaskAction: (task: Task, action: 'execute' | 'complete' | 'fail') => Promise<void>;
 }
 
 function KanbanColumnWithDragDrop({
@@ -332,6 +338,8 @@ function KanbanColumnWithDragDrop({
   type,
   cardStyle,
   onDragEnd,
+  onStatusChange,
+  onTaskAction,
 }: ColumnProps) {
   const [orderedItems, setOrderedItems] = React.useState(items);
   const isProcessing = status === 'processing';
@@ -391,8 +399,8 @@ function KanbanColumnWithDragDrop({
                     type={type} 
                     status={status} 
                     cardStyle={cardStyle}
-                    onStatusChange={handleStatusChange}
-                    onTaskAction={handleTaskAction}
+                    onStatusChange={onStatusChange}
+                    onTaskAction={onTaskAction}
                   />
                 </Reorder.Item>
               ))

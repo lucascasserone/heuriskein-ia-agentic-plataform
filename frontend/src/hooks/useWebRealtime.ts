@@ -169,7 +169,7 @@ export function useWebRealtime(
 export function useTaskRealtime() {
   const wsBase =
     process.env.NEXT_PUBLIC_WS_URL ||
-    `${typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws'}://localhost:8001/ws`;
+    `${typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws'}://127.0.0.1:8001/ws`;
   const wsUrl = `${wsBase.replace(/\/$/, '')}/tasks/`;
 
   return useWebRealtime({
@@ -184,7 +184,7 @@ export function useTaskRealtime() {
 export function useAgentRealtime() {
   const wsBase =
     process.env.NEXT_PUBLIC_WS_URL ||
-    `${typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws'}://localhost:8001/ws`;
+    `${typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws'}://127.0.0.1:8001/ws`;
   const wsUrl = `${wsBase.replace(/\/$/, '')}/agents/`;
 
   return useWebRealtime({
@@ -199,7 +199,7 @@ export function useAgentRealtime() {
 export function useEpicRealtime() {
   const wsBase =
     process.env.NEXT_PUBLIC_WS_URL ||
-    `${typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws'}://localhost:8001/ws`;
+    `${typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws'}://127.0.0.1:8001/ws`;
   const wsUrl = `${wsBase.replace(/\/$/, '')}/epics/`;
 
   return useWebRealtime({
@@ -214,7 +214,7 @@ export function useEpicRealtime() {
 export function useThoughtLogsRealtime() {
   const wsBase =
     process.env.NEXT_PUBLIC_WS_URL ||
-    `${typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws'}://localhost:8001/ws`;
+    `${typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws'}://127.0.0.1:8001/ws`;
   const wsUrl = `${wsBase.replace(/\/$/, '')}/logs/`;
 
   return useWebRealtime({
