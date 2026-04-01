@@ -9,15 +9,22 @@ import { useNotify } from '@/lib/toast';
 import EditEpicModal from '@/components/Modals/EditEpicModal';
 import EditTaskModal from '@/components/Modals/EditTaskModal';
 import ConfirmDeleteModal from '@/components/Modals/ConfirmDeleteModal';
+import TaskResultModal from '@/components/Modals/TaskResultModal';
 
 interface Task {
   id: string;
   title: string;
+  description?: string;
   status: 'queue' | 'processing' | 'review' | 'completed' | 'failed';
   priority: 'low' | 'medium' | 'high';
   assigned_to?: string;
   epic?: string | null;
   epic_goal?: string;
+  result?: Record<string, unknown> | null;
+  error?: string;
+  attempt_count?: number;
+  started_at?: string;
+  completed_at?: string;
   created_at?: string;
 }
 
@@ -79,6 +86,9 @@ export default function DualKanbanDragDrop() {
   const [deletingItem, setDeletingItem] = useState<{ item: Task | Epic; type: 'task' | 'epic' } | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
 
+  // Task result viewer
+  const [viewingTask, setViewingTask] = useState<Task | null>(null);
+
   useEffect(() => {
     let isActive = true;
 
@@ -120,6 +130,14 @@ export default function DualKanbanDragDrop() {
       window.clearInterval(interval);
     };
   }, []);
+
+  // Fast poll (every 4 s) while any task is processing
+  useEffect(() => {
+    const hasProcessing = Object.values(tasks).flat().some((t) => t.status === 'processing');
+    if (!hasProcessing) return;
+    const fastPoll = window.setInterval(fetchData, 4000);
+    return () => window.clearInterval(fastPoll);
+  }, [tasks]);
 
   const withTimeout = async <T,>(promise: Promise<T>, ms: number): Promise<T> => {
     return new Promise<T>((resolve, reject) => {
@@ -236,18 +254,28 @@ export default function DualKanbanDragDrop() {
     }
   };
 
-  const handleTaskAction = async (task: Task, action: 'execute' | 'complete' | 'fail') => {
+  const handleTaskAction = async (task: Task, action: 'execute' | 'complete' | 'fail' | 'retry' | 'viewResult') => {
+    if (action === 'viewResult') {
+      setViewingTask(task);
+      return;
+    }
+
     try {
       if (action === 'execute') {
         await apiClient.executeTask(task.id);
+        notify.success('Tarefa enviada para execução com Claude');
+      } else if (action === 'retry') {
+        await apiClient.retryTask(task.id);
+        notify.success('Re-executando tarefa com Claude');
       } else if (action === 'complete') {
         await apiClient.completeTask(task.id, { completed_by: 'ui' });
+        notify.success('Tarefa concluída');
       } else {
         await apiClient.failTask(task.id, 'Falha registrada via UI');
+        notify.success('Tarefa marcada como falha');
       }
 
       await fetchData();
-      notify.success('Tarefa atualizada com sucesso');
     } catch (error: any) {
       const detail = error?.response?.data?.error || 'Não foi possível executar a ação';
       notify.error(detail);
@@ -256,6 +284,14 @@ export default function DualKanbanDragDrop() {
 
   return (
     <>
+      <TaskResultModal
+        isOpen={!!viewingTask}
+        task={viewingTask}
+        onClose={() => setViewingTask(null)}
+        onRetry={() => {
+          if (viewingTask) handleTaskAction(viewingTask, 'retry');
+        }}
+      />
       <EditEpicModal
         isOpen={!!editingEpic}
         epic={editingEpic}
@@ -479,7 +515,7 @@ interface ColumnProps {
   cardStyle: 'blueprint' | 'vivo';
   onDragEnd: (item: Task | Epic) => void;
   onStatusChange: (item: Task | Epic, newStatus: TaskStatus | EpicStatus, type: 'task' | 'epic') => Promise<void>;
-  onTaskAction: (task: Task, action: 'execute' | 'complete' | 'fail') => Promise<void>;
+  onTaskAction: (task: Task, action: 'execute' | 'complete' | 'fail' | 'retry' | 'viewResult') => Promise<void>;
   onEdit: (item: Task | Epic) => void;
   onDelete: (item: Task | Epic) => void;
 }
@@ -576,7 +612,7 @@ interface CardProps {
   status: string;
   cardStyle: 'blueprint' | 'vivo';
   onStatusChange: (item: Task | Epic, newStatus: TaskStatus | EpicStatus, type: 'task' | 'epic') => Promise<void>;
-  onTaskAction: (task: Task, action: 'execute' | 'complete' | 'fail') => Promise<void>;
+  onTaskAction: (task: Task, action: 'execute' | 'complete' | 'fail' | 'retry' | 'viewResult') => Promise<void>;
   onEdit: (item: Task | Epic) => void;
   onDelete: (item: Task | Epic) => void;
 }
@@ -748,28 +784,64 @@ function DragDropCard({ item, type, status, cardStyle, onStatusChange, onTaskAct
           </select>
         )}
 
+        {/* Queue → Executar com Claude */}
         {type === 'task' && (item as Task).status === 'queue' && (
           <button
             onClick={() => onTaskAction(item as Task, 'execute')}
-            className="text-xs px-2 py-1 rounded bg-primary/20 border border-primary/40 text-primary hover:bg-primary/30"
+            className="w-full text-xs px-2 py-1.5 rounded bg-primary/20 border border-primary/40 text-primary hover:bg-primary/30 transition-colors font-medium"
           >
-            Executar
+            ▶ Executar com Claude
           </button>
         )}
 
+        {/* Processing → spinner + botões manuais */}
         {type === 'task' && (item as Task).status === 'processing' && (
-          <div className="flex gap-2">
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-1.5 text-xs text-primary/80">
+              <span className="w-2 h-2 rounded-full bg-primary animate-pulse shrink-0" />
+              <span>Claude executando...</span>
+            </div>
+            <div className="flex gap-1.5">
+              <button
+                onClick={() => onTaskAction(item as Task, 'complete')}
+                className="flex-1 text-xs px-2 py-1 rounded bg-green-500/20 border border-green-500/40 text-green-300 hover:bg-green-500/30 transition-colors"
+              >
+                ✓ Concluir
+              </button>
+              <button
+                onClick={() => onTaskAction(item as Task, 'fail')}
+                className="flex-1 text-xs px-2 py-1 rounded bg-red-500/20 border border-red-500/40 text-red-300 hover:bg-red-500/30 transition-colors"
+              >
+                ✕ Falhar
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Completed → Ver resultado */}
+        {type === 'task' && (item as Task).status === 'completed' && (item as Task).result && (
+          <button
+            onClick={() => onTaskAction(item as Task, 'viewResult')}
+            className="w-full text-xs px-2 py-1.5 rounded bg-green-500/10 border border-green-500/30 text-green-400 hover:bg-green-500/20 transition-colors"
+          >
+            📋 Ver resultado
+          </button>
+        )}
+
+        {/* Failed → Retry */}
+        {type === 'task' && (item as Task).status === 'failed' && (
+          <div className="flex gap-1.5">
             <button
-              onClick={() => onTaskAction(item as Task, 'complete')}
-              className="flex-1 text-xs px-2 py-1 rounded bg-green-500/20 border border-green-500/40 text-green-300 hover:bg-green-500/30"
+              onClick={() => onTaskAction(item as Task, 'viewResult')}
+              className="flex-1 text-xs px-2 py-1 rounded bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20 transition-colors"
             >
-              Concluir
+              Ver erro
             </button>
             <button
-              onClick={() => onTaskAction(item as Task, 'fail')}
-              className="flex-1 text-xs px-2 py-1 rounded bg-red-500/20 border border-red-500/40 text-red-300 hover:bg-red-500/30"
+              onClick={() => onTaskAction(item as Task, 'retry')}
+              className="flex-1 text-xs px-2 py-1 rounded bg-primary/20 border border-primary/40 text-primary hover:bg-primary/30 transition-colors"
             >
-              Falhar
+              ↺ Retry
             </button>
           </div>
         )}

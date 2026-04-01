@@ -17,6 +17,7 @@ class Agent(models.Model):
         ('thinking', 'Pensando'),
         ('executing', 'Executando'),
         ('blocked', 'Bloqueado'),
+        ('error', 'Erro'),
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

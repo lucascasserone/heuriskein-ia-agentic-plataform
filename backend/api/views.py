@@ -17,6 +17,7 @@ from api.serializers import (
     ChatRequestSerializer, ChatResponseSerializer
 )
 from api.llm_service import get_llm_service
+from api.execution_engine import execute_task_async
 
 
 class RegisterAPIView(APIView):
@@ -168,57 +169,91 @@ class TaskViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'])
     def execute(self, request, pk=None):
-        """Executar uma tarefa"""
+        """Executar uma tarefa com Claude via execution engine"""
         task = self.get_object()
-        
-        if task.status != 'queue':
+
+        if task.status == 'processing':
             return Response(
-                {'error': 'Apenas tarefas em fila podem ser executadas'},
+                {'error': 'Tarefa já está em execução'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        # Find available agent
-        available_agents = Agent.objects.filter(
-            state='idle',
-            capabilities__icontains=request.data.get('capability', '')
-        )
 
-        if not available_agents.exists() and not Agent.objects.exists():
+        if task.status == 'completed':
+            return Response(
+                {'error': 'Tarefa já foi completada. Use retry para re-executar.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Ensure there's at least one idle agent — create default if none exist
+        if not Agent.objects.exists():
             Agent.objects.create(
-                name='Executor Padrão',
+                name='Claude Executor',
+                type='executor',
+                model='claude-3-5-sonnet-20241022',
+                capabilities=['general', 'execution', 'analysis', 'planning']
+            )
+
+        available_agents = Agent.objects.filter(state='idle')
+        if not available_agents.exists():
+            # All agents busy — create a dedicated one for this task
+            agent = Agent.objects.create(
+                name=f'Claude Agent #{task.attempt_count + 1}',
                 type='executor',
                 model='claude-3-5-sonnet-20241022',
                 capabilities=['general', 'execution', 'analysis']
             )
-            available_agents = Agent.objects.filter(state='idle')
-        
-        if not available_agents.exists():
-            return Response(
-                {'error': 'Nenhum agente disponível'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        agent = available_agents.first()
+        else:
+            agent = available_agents.first()
+
+        # Transition task → processing
         task.status = 'processing'
         task.assigned_to = agent
         task.attempt_count += 1
         task.started_at = timezone.now()
-        task.save()
-        
-        agent.state = 'executing'
+        task.error = ''
+        task.result = None
+        task.save(update_fields=['status', 'assigned_to', 'attempt_count', 'started_at', 'error', 'result'])
+
+        # Transition agent → thinking
+        agent.state = 'thinking'
         agent.current_task = task
         agent.last_activity = timezone.now()
-        agent.save()
-        
-        # Log the execution
+        agent.save(update_fields=['state', 'current_task', 'last_activity'])
+
         ThoughtLog.objects.create(
             agent=agent,
             task=task,
-            message=f"Iniciando execução de tarefa: {task.title}",
+            message=f"🚀 Iniciando execução: {task.title}",
             level='info'
         )
-        
-        return Response(TaskSerializer(task).data)
+
+        # Dispatch async execution (background thread)
+        execute_task_async(str(task.pk))
+
+        return Response(TaskSerializer(task).data, status=status.HTTP_202_ACCEPTED)
+
+    @action(detail=True, methods=['post'])
+    def retry(self, request, pk=None):
+        """Re-executar uma tarefa que falhou"""
+        task = self.get_object()
+        if task.status not in ('failed', 'queue'):
+            return Response(
+                {'error': 'Apenas tarefas em fila ou com falha podem ser re-executadas'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        task.status = 'queue'
+        task.error = ''
+        task.result = None
+        task.save(update_fields=['status', 'error', 'result'])
+        return self.execute(request, pk=pk)
+
+    @action(detail=True, methods=['get'])
+    def logs(self, request, pk=None):
+        """Retorna os logs de pensamento de uma tarefa"""
+        task = self.get_object()
+        logs = ThoughtLog.objects.filter(task=task).order_by('timestamp')
+        serializer = ThoughtLogSerializer(logs, many=True)
+        return Response(serializer.data)
     
     @action(detail=True, methods=['post'])
     def complete(self, request, pk=None):
