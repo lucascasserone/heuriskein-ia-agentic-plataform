@@ -4,8 +4,11 @@ import React, { useEffect, useState } from 'react';
 import { Reorder, motion, AnimatePresence } from 'framer-motion';
 import { useAppStore } from '@/store/appStore';
 import { apiClient } from '@/lib/api';
-import { LayoutGrid, Zap, CheckCircle2, Clock, AlertCircle, User, Timer, Eye, EyeOff } from 'lucide-react';
+import { LayoutGrid, Zap, CheckCircle2, Clock, AlertCircle, User, Timer, Eye, EyeOff, Pencil, Trash2, Search, X as XIcon } from 'lucide-react';
 import { useNotify } from '@/lib/toast';
+import EditEpicModal from '@/components/Modals/EditEpicModal';
+import EditTaskModal from '@/components/Modals/EditTaskModal';
+import ConfirmDeleteModal from '@/components/Modals/ConfirmDeleteModal';
 
 interface Task {
   id: string;
@@ -13,7 +16,8 @@ interface Task {
   status: 'queue' | 'processing' | 'review' | 'completed' | 'failed';
   priority: 'low' | 'medium' | 'high';
   assigned_to?: string;
-  epic?: string;
+  epic?: string | null;
+  epic_goal?: string;
   created_at?: string;
 }
 
@@ -64,6 +68,16 @@ export default function DualKanbanDragDrop() {
   const [loading, setLoading] = useState(true);
   const [showFlowGraph, setShowFlowGraph] = useState(false);
   const notify = useNotify();
+
+  // Search & filter state
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterPriority, setFilterPriority] = useState<'all' | 'low' | 'medium' | 'high'>('all');
+
+  // Edit/Delete state
+  const [editingEpic, setEditingEpic] = useState<Epic | null>(null);
+  const [editingTask, setEditingTask] = useState<Task | null>(null);
+  const [deletingItem, setDeletingItem] = useState<{ item: Task | Epic; type: 'task' | 'epic' } | null>(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
 
   useEffect(() => {
     let isActive = true;
@@ -179,6 +193,49 @@ export default function DualKanbanDragDrop() {
     }
   };
 
+  const handleEdit = (item: Task | Epic, type: 'task' | 'epic') => {
+    if (type === 'epic') {
+      setEditingEpic(item as Epic);
+    } else {
+      setEditingTask(item as Task);
+    }
+  };
+
+  const handleDeleteRequest = (item: Task | Epic, type: 'task' | 'epic') => {
+    setDeletingItem({ item, type });
+  };
+
+  // Filter helper
+  const filterItems = <T extends Task | Epic>(items: T[]): T[] => {
+    return items.filter((item) => {
+      const text = 'goal' in item ? item.goal : (item as Task).title;
+      const matchesSearch = searchQuery === '' || text.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesPriority = filterPriority === 'all' || item.priority === filterPriority;
+      return matchesSearch && matchesPriority;
+    });
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!deletingItem) return;
+    setDeleteLoading(true);
+    try {
+      if (deletingItem.type === 'epic') {
+        await apiClient.deleteEpic(deletingItem.item.id);
+        notify.success('Épica excluída com sucesso');
+      } else {
+        await apiClient.deleteTask(deletingItem.item.id);
+        notify.success('Tarefa excluída com sucesso');
+      }
+      setDeletingItem(null);
+      fetchData();
+    } catch (error: any) {
+      const msg = error?.response?.data?.error || 'Erro ao excluir';
+      notify.error(msg);
+    } finally {
+      setDeleteLoading(false);
+    }
+  };
+
   const handleTaskAction = async (task: Task, action: 'execute' | 'complete' | 'fail') => {
     try {
       if (action === 'execute') {
@@ -198,7 +255,35 @@ export default function DualKanbanDragDrop() {
   };
 
   return (
-    <div className="p-4 lg:p-5 h-full flex flex-col bg-dark overflow-hidden">
+    <>
+      <EditEpicModal
+        isOpen={!!editingEpic}
+        epic={editingEpic}
+        onClose={() => setEditingEpic(null)}
+        onSuccess={() => {
+          setEditingEpic(null);
+          fetchData();
+        }}
+      />
+      <EditTaskModal
+        isOpen={!!editingTask}
+        task={editingTask}
+        onClose={() => setEditingTask(null)}
+        onSuccess={() => {
+          setEditingTask(null);
+          fetchData();
+        }}
+      />
+      <ConfirmDeleteModal
+        isOpen={!!deletingItem}
+        title={deletingItem ? ('goal' in deletingItem.item ? deletingItem.item.goal : (deletingItem.item as Task).title) : ''}
+        description={`Excluir esta ${deletingItem?.type === 'epic' ? 'épica' : 'tarefa'} permanentemente?`}
+        confirmLabel={`Excluir ${deletingItem?.type === 'epic' ? 'Épica' : 'Tarefa'}`}
+        loading={deleteLoading}
+        onConfirm={handleDeleteConfirm}
+        onCancel={() => setDeletingItem(null)}
+      />
+      <div className="p-4 lg:p-5 h-full flex flex-col bg-dark overflow-hidden">
       {loading && (
         <div className="mb-3 text-xs text-gray-light flex items-center gap-2">
           <span className="inline-block w-2 h-2 rounded-full bg-primary animate-pulse" />
@@ -235,6 +320,68 @@ export default function DualKanbanDragDrop() {
           </motion.button>
         </div>
         <p className="text-xs lg:text-sm text-gray-light ml-8 lg:ml-9">{showFlowGraph ? 'Fluxo de Trabalho' : 'Planejamento e Execução em tempo real'}</p>
+
+        {/* Search + Priority Filter */}
+        {!showFlowGraph && (
+          <div className="flex items-center gap-2 mt-3">
+            {/* Search box */}
+            <div className="relative flex-1 max-w-xs">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-light pointer-events-none" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Buscar épicas e tarefas…"
+                className="
+                  w-full pl-8 pr-8 py-1.5 text-xs bg-surface border border-gray-metallic/30 rounded-lg
+                  text-text-default placeholder-gray-dim
+                  focus:outline-none focus:border-primary/60 transition-colors
+                "
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-light hover:text-text-default"
+                >
+                  <XIcon size={12} />
+                </button>
+              )}
+            </div>
+
+            {/* Priority filter chips */}
+            <div className="flex items-center gap-1">
+              {(['all', 'high', 'medium', 'low'] as const).map((p) => (
+                <button
+                  key={p}
+                  onClick={() => setFilterPriority(p)}
+                  className={`
+                    px-2.5 py-1 rounded-md text-xs font-semibold transition-all border
+                    ${filterPriority === p
+                      ? p === 'high' ? 'bg-red-500/30 border-red-400/60 text-red-300'
+                        : p === 'medium' ? 'bg-yellow-500/30 border-yellow-400/60 text-yellow-300'
+                        : p === 'low' ? 'bg-blue-500/30 border-blue-400/60 text-blue-300'
+                        : 'bg-primary/20 border-primary/40 text-primary'
+                      : 'bg-transparent border-gray-metallic/20 text-gray-dim hover:text-gray-light hover:border-gray-metallic/40'
+                    }
+                  `}
+                >
+                  {p === 'all' ? 'Todos' : p === 'high' ? 'Alta' : p === 'medium' ? 'Média' : 'Baixa'}
+                </button>
+              ))}
+            </div>
+
+            {/* Active filter count badge */}
+            {(searchQuery || filterPriority !== 'all') && (
+              <button
+                onClick={() => { setSearchQuery(''); setFilterPriority('all'); }}
+                className="text-xs text-gray-dim hover:text-red-400 transition-colors ml-1"
+                title="Limpar filtros"
+              >
+                <XIcon size={14} />
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Kanban or Flow Graph - Toggle View */}
@@ -259,12 +406,14 @@ export default function DualKanbanDragDrop() {
                 status={key}
                 label={label}
                 icon={icon}
-                items={epics[key] || []}
+                items={filterItems(epics[key] || [])}
                 type="epic"
                 cardStyle="blueprint"
                 onDragEnd={(item) => handleDragEnd(item, key as EpicStatus, 'epic')}
                 onStatusChange={handleStatusChange}
                 onTaskAction={handleTaskAction}
+                onEdit={(item) => handleEdit(item, 'epic')}
+                onDelete={(item) => handleDeleteRequest(item, 'epic')}
               />
             ))}
           </div>
@@ -289,12 +438,14 @@ export default function DualKanbanDragDrop() {
                 status={key}
                 label={label}
                 icon={icon}
-                items={tasks[key] || []}
+                items={filterItems(tasks[key] || [])}
                 type="task"
                 cardStyle="vivo"
                 onDragEnd={(item) => handleDragEnd(item, key as TaskStatus, 'task')}
                 onStatusChange={handleStatusChange}
                 onTaskAction={handleTaskAction}
+                onEdit={(item) => handleEdit(item, 'task')}
+                onDelete={(item) => handleDeleteRequest(item, 'task')}
               />
             ))}
           </div>
@@ -314,7 +465,8 @@ export default function DualKanbanDragDrop() {
           </div>
         </motion.div>
       )}
-    </div>
+      </div>
+    </>
   );
 }
 
@@ -328,6 +480,8 @@ interface ColumnProps {
   onDragEnd: (item: Task | Epic) => void;
   onStatusChange: (item: Task | Epic, newStatus: TaskStatus | EpicStatus, type: 'task' | 'epic') => Promise<void>;
   onTaskAction: (task: Task, action: 'execute' | 'complete' | 'fail') => Promise<void>;
+  onEdit: (item: Task | Epic) => void;
+  onDelete: (item: Task | Epic) => void;
 }
 
 function KanbanColumnWithDragDrop({
@@ -340,6 +494,8 @@ function KanbanColumnWithDragDrop({
   onDragEnd,
   onStatusChange,
   onTaskAction,
+  onEdit,
+  onDelete,
 }: ColumnProps) {
   const [orderedItems, setOrderedItems] = React.useState(items);
   const isProcessing = status === 'processing';
@@ -401,6 +557,8 @@ function KanbanColumnWithDragDrop({
                     cardStyle={cardStyle}
                     onStatusChange={onStatusChange}
                     onTaskAction={onTaskAction}
+                    onEdit={onEdit}
+                    onDelete={onDelete}
                   />
                 </Reorder.Item>
               ))
@@ -419,9 +577,11 @@ interface CardProps {
   cardStyle: 'blueprint' | 'vivo';
   onStatusChange: (item: Task | Epic, newStatus: TaskStatus | EpicStatus, type: 'task' | 'epic') => Promise<void>;
   onTaskAction: (task: Task, action: 'execute' | 'complete' | 'fail') => Promise<void>;
+  onEdit: (item: Task | Epic) => void;
+  onDelete: (item: Task | Epic) => void;
 }
 
-function DragDropCard({ item, type, status, cardStyle, onStatusChange, onTaskAction }: CardProps) {
+function DragDropCard({ item, type, status, cardStyle, onStatusChange, onTaskAction, onEdit, onDelete }: CardProps) {
   const title = 'goal' in item ? item.goal : item.title;
   const priority = item.priority || 'medium';
   const colors = priorityColors[priority as keyof typeof priorityColors];
@@ -464,10 +624,28 @@ function DragDropCard({ item, type, status, cardStyle, onStatusChange, onTaskAct
         ${status === 'processing' && cardStyle === 'vivo' ? 'animate-pulse-glow' : ''}
       `}
     >
-      {/* Title - Improved contrast */}
-      <p className="font-semibold text-xs lg:text-sm leading-tight mb-2 text-text-title group-hover:text-primary transition-colors">
-        {title}
-      </p>
+      {/* Title row with edit/delete buttons */}
+      <div className="flex items-start gap-1 mb-2">
+        <p className="flex-1 font-semibold text-xs lg:text-sm leading-tight text-text-title group-hover:text-primary transition-colors">
+          {title}
+        </p>
+        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0 ml-1">
+          <button
+            onClick={(e) => { e.stopPropagation(); onEdit(item); }}
+            className="p-1 rounded hover:bg-primary/20 text-gray-light hover:text-primary transition-colors"
+            title="Editar"
+          >
+            <Pencil size={12} />
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); onDelete(item); }}
+            className="p-1 rounded hover:bg-red-500/20 text-gray-light hover:text-red-400 transition-colors"
+            title="Excluir"
+          >
+            <Trash2 size={12} />
+          </button>
+        </div>
+      </div>
 
       {/* Priority Badge with better contrast */}
       <div className="flex items-center justify-between mb-2 lg:mb-3">
@@ -481,6 +659,15 @@ function DragDropCard({ item, type, status, cardStyle, onStatusChange, onTaskAct
           </div>
         )}
       </div>
+
+      {/* Epic Badge for Tasks */}
+      {type === 'task' && 'epic_goal' in item && item.epic_goal && (
+        <div className="flex items-center gap-1 mb-2 overflow-hidden">
+          <span className="text-[10px] lg:text-xs text-primary/70 font-mono truncate max-w-full">
+            📎 {item.epic_goal}
+          </span>
+        </div>
+      )}
 
       {/* Progress Bar for Epics */}
       {progress !== null && (

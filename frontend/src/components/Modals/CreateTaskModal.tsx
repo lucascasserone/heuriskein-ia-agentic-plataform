@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { X } from 'lucide-react';
 import { apiClient } from '@/lib/api';
 import { useNotify } from '@/lib/toast';
@@ -19,6 +19,11 @@ interface TaskFormData {
   epic_id?: string;
 }
 
+interface EpicOption {
+  id: string;
+  goal: string;
+}
+
 export default function CreateTaskModal({
   isOpen,
   onClose,
@@ -30,8 +35,19 @@ export default function CreateTaskModal({
     description: '',
     priority: 'medium',
   });
+  const [epics, setEpics] = useState<EpicOption[]>([]);
   const [loading, setLoading] = useState(false);
   const notify = useNotify();
+
+  useEffect(() => {
+    if (!isOpen) return;
+    apiClient.getEpics()
+      .then((res) => {
+        const list = res.data?.results || res.data || [];
+        setEpics(list);
+      })
+      .catch(() => setEpics([]));
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -165,6 +181,33 @@ export default function CreateTaskModal({
                 <option value="low">Baixa</option>
                 <option value="medium">Média</option>
                 <option value="high">Alta</option>
+              </select>
+            </div>
+
+            {/* Epic selector */}
+            <div>
+              <label className="block text-sm font-semibold text-text-title mb-2">
+                Épica vinculada <span className="text-gray-dim font-normal">(opcional)</span>
+              </label>
+              <select
+                name="epic_id"
+                value={formData.epic_id || ''}
+                onChange={handleChange}
+                disabled={loading}
+                className="
+                  w-full px-4 py-2.5 bg-darker border-2 border-gray-metallic/40 rounded-lg
+                  text-text-default font-medium
+                  focus:outline-none focus:border-success focus:ring-2 focus:ring-success/50
+                  transition-all duration-300
+                  disabled:opacity-50 disabled:cursor-not-allowed
+                "
+              >
+                <option value="">Sem épica</option>
+                {epics.map((epic) => (
+                  <option key={epic.id} value={epic.id}>
+                    {epic.goal}
+                  </option>
+                ))}
               </select>
             </div>
 

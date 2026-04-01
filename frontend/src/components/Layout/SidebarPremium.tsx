@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Home,
   Zap,
@@ -10,10 +10,28 @@ import {
   LogIn,
   Plus,
   BarChart3,
+  Bot,
 } from 'lucide-react';
 import { useAppStore } from '@/store/appStore';
 import CreateEpicModal from '@/components/Modals/CreateEpicModal';
 import CreateTaskModal from '@/components/Modals/CreateTaskModal';
+import { apiClient } from '@/lib/api';
+
+interface Agent {
+  id: string;
+  name: string;
+  type: string;
+  state: 'idle' | 'thinking' | 'executing' | 'blocked' | 'error';
+  model?: string;
+}
+
+const agentStateColor: Record<string, string> = {
+  idle: 'bg-gray-500',
+  thinking: 'bg-yellow-400 animate-led-pulse',
+  executing: 'bg-primary animate-led-pulse shadow-glow-primary',
+  blocked: 'bg-orange-400',
+  error: 'bg-red-500',
+};
 
 interface SidebarProps {
   onCreateEpic?: () => void;
@@ -23,7 +41,8 @@ interface SidebarProps {
 export default function Sidebar({ onCreateEpic, onCreateTask }: SidebarProps) {
   const [isCreateEpicOpen, setIsCreateEpicOpen] = useState(false);
   const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(false);
-  
+  const [agents, setAgents] = useState<Agent[]>([]);
+
   const isAuthenticated = useAppStore((state) => state.isAuthenticated);
   const user = useAppStore((state) => state.user);
   const setLoginModalOpen = useAppStore((state) => state.setLoginModalOpen);
@@ -35,11 +54,20 @@ export default function Sidebar({ onCreateEpic, onCreateTask }: SidebarProps) {
     logout();
   };
 
-  const [agentStats] = useState({
-    coordinator: { name: 'Coordenador', active: 0, capacity: 3 },
-    executor: { name: 'Executor', active: 0, capacity: 5 },
-    analyst: { name: 'Analista', active: 0, capacity: 2 },
-  });
+  // Load agents from API
+  useEffect(() => {
+    const loadAgents = () => {
+      apiClient.get('/agents/')
+        .then((res) => {
+          const list = res.data?.results || res.data || [];
+          setAgents(list);
+        })
+        .catch(() => setAgents([]));
+    };
+    loadAgents();
+    const interval = window.setInterval(loadAgents, 15000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   const openCreateEpic = () => {
     setIsCreateEpicOpen(true);
@@ -110,39 +138,32 @@ export default function Sidebar({ onCreateEpic, onCreateTask }: SidebarProps) {
           </button>
         </div>
 
-        {/* ===== AGENT STATUS - LED SEGMENTS ===== */}
+        {/* ===== AGENT STATUS ===== */}
         <div className="p-4 border-b border-primary/10">
-          <h3 className="text-xs font-bold text-text-title uppercase tracking-widest mb-3">
-            Status dos Agentes
-          </h3>
-          <div className="space-y-3">
-            {Object.entries(agentStats).map(([key, agent]) => (
-              <div key={key} className="glassmorphism p-3 rounded-lg">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-semibold text-text-title">{agent.name}</span>
-                  <span className="text-xs font-mono text-primary font-bold">
-                    {agent.active}/{agent.capacity}
-                  </span>
-                </div>
-                {/* LED Segment Display */}
-                <div className="flex items-center gap-1">
-                  {Array.from({ length: agent.capacity }).map((_, i) => (
-                    <div
-                      key={i}
-                      className={`
-                        flex-1 h-3 rounded-sm transition-all duration-300 border border-gray-metallic/30
-                        ${
-                          i < agent.active 
-                            ? 'bg-primary animate-led-pulse shadow-glow-primary' 
-                            : 'bg-gray-metallic/20'
-                        }
-                      `}
-                    />
-                  ))}
-                </div>
-              </div>
-            ))}
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-xs font-bold text-text-title uppercase tracking-widest">
+              Agentes
+            </h3>
+            <span className="text-xs font-mono text-primary">
+              {agents.filter((a) => a.state === 'executing' || a.state === 'thinking').length} ativos
+            </span>
           </div>
+          {agents.length === 0 ? (
+            <p className="text-xs text-gray-dim text-center py-2">Sem agentes cadastrados</p>
+          ) : (
+            <div className="space-y-2">
+              {agents.slice(0, 5).map((agent) => (
+                <div key={agent.id} className="glassmorphism px-3 py-2 rounded-lg flex items-center gap-2">
+                  <div className={`w-2 h-2 rounded-full shrink-0 ${agentStateColor[agent.state] || 'bg-gray-500'}`} />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-semibold text-text-title truncate">{agent.name}</p>
+                    <p className="text-xs text-gray-dim font-mono">{agent.state}</p>
+                  </div>
+                  <Bot size={12} className="text-gray-dim shrink-0" />
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* ===== NAVIGATION ===== */}
