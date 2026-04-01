@@ -49,68 +49,80 @@ class ClaudeProvider(LLMProvider):
         self.model = getattr(settings, 'CLAUDE_MODEL', 'claude-3-5-sonnet-20241022')
         self.client = Anthropic(api_key=api_key)
 
-    def _resolve_model(self, requested_model: str, error_text: str) -> str:
-        """Fallback to a stable alias when Anthropic returns model-not-found."""
-        if 'not_found_error' in error_text or 'model:' in error_text:
-            if requested_model != 'claude-3-5-sonnet-latest':
-                return 'claude-3-5-sonnet-latest'
-        return requested_model
+    def _is_model_not_found_error(self, error_text: str) -> bool:
+        text = error_text.lower()
+        return 'not_found_error' in text or 'model:' in text or 'does not exist' in text
+
+    def _candidate_models(self, requested_model: str) -> list[str]:
+        """Ordered candidate models to maximize compatibility across Anthropic accounts."""
+        candidates = [
+            requested_model,
+            'claude-3-5-sonnet-latest',
+            'claude-3-5-sonnet-20240620',
+            'claude-3-7-sonnet-20250219',
+            'claude-sonnet-4-20250514',
+            'claude-3-5-sonnet-20241022',
+            'claude-3-haiku-20240307',
+            'claude-3-5-haiku-20241022',
+            'claude-opus-4-20250514',
+            'claude-3-opus-20240229',
+        ]
+        unique: list[str] = []
+        for model in candidates:
+            if model and model not in unique:
+                unique.append(model)
+        return unique
+
+    def _chat_with_fallback(self, messages: list[dict], system: Optional[str] = None) -> str:
+        last_error: Optional[str] = None
+        for model in self._candidate_models(self.model):
+            try:
+                response = self.client.messages.create(
+                    model=model,
+                    max_tokens=2048,
+                    system=system or "You are a helpful AI assistant analyzing tasks and providing insights.",
+                    messages=messages,
+                )
+                self.model = model
+                return response.content[0].text
+            except Exception as e:
+                err_text = str(e)
+                last_error = err_text
+                # If it's not model-not-found, fail fast (auth, billing, quota, etc.)
+                if not self._is_model_not_found_error(err_text):
+                    raise Exception(f"Claude API error: {err_text}")
+                continue
+
+        raise Exception(f"Claude API error: {last_error or 'No compatible Claude model found'}")
     
     def chat(self, messages: list[dict], system: Optional[str] = None) -> str:
         """Get non-streaming response from Claude"""
-        try:
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=2048,
-                system=system or "You are a helpful AI assistant analyzing tasks and providing insights.",
-                messages=messages,
-            )
-            return response.content[0].text
-        except Exception as e:
-            fallback_model = self._resolve_model(self.model, str(e))
-            if fallback_model != self.model:
-                try:
-                    response = self.client.messages.create(
-                        model=fallback_model,
-                        max_tokens=2048,
-                        system=system or "You are a helpful AI assistant analyzing tasks and providing insights.",
-                        messages=messages,
-                    )
-                    self.model = fallback_model
-                    return response.content[0].text
-                except Exception as e2:
-                    raise Exception(f"Claude API error: {str(e2)}")
-            raise Exception(f"Claude API error: {str(e)}")
+        return self._chat_with_fallback(messages, system)
     
     def stream_chat(self, messages: list[dict], system: Optional[str] = None) -> Generator[str, None, None]:
         """Stream response from Claude"""
-        try:
-            with self.client.messages.stream(
-                model=self.model,
-                max_tokens=2048,
-                system=system or "You are a helpful AI assistant analyzing tasks and providing insights.",
-                messages=messages,
-            ) as stream:
-                for text in stream.text_stream:
-                    yield text
-        except Exception as e:
-            fallback_model = self._resolve_model(self.model, str(e))
-            if fallback_model != self.model:
-                try:
-                    with self.client.messages.stream(
-                        model=fallback_model,
-                        max_tokens=2048,
-                        system=system or "You are a helpful AI assistant analyzing tasks and providing insights.",
-                        messages=messages,
-                    ) as stream:
-                        self.model = fallback_model
-                        for text in stream.text_stream:
-                            yield text
+        last_error: Optional[str] = None
+        for model in self._candidate_models(self.model):
+            try:
+                with self.client.messages.stream(
+                    model=model,
+                    max_tokens=2048,
+                    system=system or "You are a helpful AI assistant analyzing tasks and providing insights.",
+                    messages=messages,
+                ) as stream:
+                    self.model = model
+                    for text in stream.text_stream:
+                        yield text
+                return
+            except Exception as e:
+                err_text = str(e)
+                last_error = err_text
+                if not self._is_model_not_found_error(err_text):
+                    yield f"Error: {err_text}"
                     return
-                except Exception as e2:
-                    yield f"Error: {str(e2)}"
-                    return
-            yield f"Error: {str(e)}"
+                continue
+
+        yield f"Error: {last_error or 'No compatible Claude model found'}"
 
 
 class OpenAIProvider(LLMProvider):
