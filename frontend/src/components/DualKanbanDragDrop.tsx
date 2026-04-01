@@ -10,6 +10,7 @@ import EditEpicModal from '@/components/Modals/EditEpicModal';
 import EditTaskModal from '@/components/Modals/EditTaskModal';
 import ConfirmDeleteModal from '@/components/Modals/ConfirmDeleteModal';
 import TaskResultModal from '@/components/Modals/TaskResultModal';
+import { useTaskRealtime } from '@/hooks/useWebRealtime';
 
 interface Task {
   id: string;
@@ -88,6 +89,7 @@ export default function DualKanbanDragDrop() {
 
   // Task result viewer
   const [viewingTask, setViewingTask] = useState<Task | null>(null);
+  const taskRealtime = useTaskRealtime();
 
   useEffect(() => {
     let isActive = true;
@@ -116,6 +118,16 @@ export default function DualKanbanDragDrop() {
       isActive = false;
     };
   }, []);
+
+  useEffect(() => {
+    const unsubTask = taskRealtime.subscribe('task_updated', () => {
+      fetchData();
+    });
+
+    return () => {
+      unsubTask();
+    };
+  }, [taskRealtime]);
 
   useEffect(() => {
     const refreshHandler = () => {

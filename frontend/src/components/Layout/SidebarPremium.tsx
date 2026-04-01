@@ -16,6 +16,7 @@ import { useAppStore } from '@/store/appStore';
 import CreateEpicModal from '@/components/Modals/CreateEpicModal';
 import CreateTaskModal from '@/components/Modals/CreateTaskModal';
 import { apiClient } from '@/lib/api';
+import { useAgentRealtime } from '@/hooks/useWebRealtime';
 
 interface Agent {
   id: string;
@@ -42,6 +43,7 @@ export default function Sidebar({ onCreateEpic, onCreateTask }: SidebarProps) {
   const [isCreateEpicOpen, setIsCreateEpicOpen] = useState(false);
   const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(false);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const agentRealtime = useAgentRealtime();
 
   const isAuthenticated = useAppStore((state) => state.isAuthenticated);
   const user = useAppStore((state) => state.user);
@@ -68,6 +70,22 @@ export default function Sidebar({ onCreateEpic, onCreateTask }: SidebarProps) {
     const interval = window.setInterval(loadAgents, 15000);
     return () => window.clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    const unsub = agentRealtime.subscribe('agent_status_changed', (message) => {
+      const agentId = String(message.agent_id || '');
+      const state = String(message.state || 'idle') as Agent['state'];
+
+      setAgents((prev) => {
+        if (!prev.some((a) => String(a.id) === agentId)) return prev;
+        return prev.map((a) => (String(a.id) === agentId ? { ...a, state } : a));
+      });
+    });
+
+    return () => {
+      unsub();
+    };
+  }, [agentRealtime]);
 
   const openCreateEpic = () => {
     setIsCreateEpicOpen(true);

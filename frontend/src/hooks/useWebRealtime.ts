@@ -174,7 +174,7 @@ export function useTaskRealtime() {
 
   return useWebRealtime({
     url: wsUrl,
-    autoReconnect: false,
+    autoReconnect: true,
   });
 }
 
@@ -189,7 +189,7 @@ export function useAgentRealtime() {
 
   return useWebRealtime({
     url: wsUrl,
-    autoReconnect: false,
+    autoReconnect: true,
   });
 }
 
@@ -204,7 +204,7 @@ export function useEpicRealtime() {
 
   return useWebRealtime({
     url: wsUrl,
-    autoReconnect: false,
+    autoReconnect: true,
   });
 }
 
@@ -219,6 +219,6 @@ export function useThoughtLogsRealtime() {
 
   return useWebRealtime({
     url: wsUrl,
-    autoReconnect: false,
+    autoReconnect: true,
   });
 }

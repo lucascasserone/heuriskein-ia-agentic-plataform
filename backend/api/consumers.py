@@ -1,6 +1,7 @@
 import json
 from channels.generic.websocket import AsyncWebsocketConsumer
 from asgiref.sync import sync_to_async
+from django.conf import settings
 from api.models import Task, Agent, ThoughtLog, Epic
 
 
@@ -9,7 +10,7 @@ class TaskConsumer(AsyncWebsocketConsumer):
     
     async def connect(self):
         self.user = self.scope["user"]
-        if not self.user.is_authenticated:
+        if not self.user.is_authenticated and not settings.DEBUG:
             await self.close()
             return
         
@@ -127,7 +128,7 @@ class AgentConsumer(AsyncWebsocketConsumer):
     
     async def connect(self):
         self.user = self.scope["user"]
-        if not self.user.is_authenticated:
+        if not self.user.is_authenticated and not settings.DEBUG:
             await self.close()
             return
         
@@ -212,7 +213,7 @@ class ThoughtLogConsumer(AsyncWebsocketConsumer):
     
     async def connect(self):
         self.user = self.scope["user"]
-        if not self.user.is_authenticated:
+        if not self.user.is_authenticated and not settings.DEBUG:
             await self.close()
             return
         
@@ -269,7 +270,7 @@ class EpicUpdateConsumer(AsyncWebsocketConsumer):
     
     async def connect(self):
         self.user = self.scope["user"]
-        if not self.user.is_authenticated:
+        if not self.user.is_authenticated and not settings.DEBUG:
             await self.close()
             return
         

@@ -3,6 +3,7 @@
 import React, { useEffect } from 'react';
 import { useAppStore } from '@/store/appStore';
 import { Terminal, X } from 'lucide-react';
+import { useThoughtLogsRealtime } from '@/hooks/useWebRealtime';
 
 const logLevelColors = {
   debug: 'text-blue-400',
@@ -19,10 +20,12 @@ const logLevelIcons = {
 };
 
 export default function LogsConsole() {
-  const [logs, clearLogs] = useAppStore((state) => [
+  const [logs, clearLogs, addLog] = useAppStore((state) => [
     state.logs,
     state.clearLogs,
+    state.addLog,
   ]);
+  const logsRealtime = useThoughtLogsRealtime();
 
   // Scroll to bottom when new logs arrive
   useEffect(() => {
@@ -31,6 +34,22 @@ export default function LogsConsole() {
       logsContainer.scrollTop = logsContainer.scrollHeight;
     }
   }, [logs]);
+
+  useEffect(() => {
+    const unsubLogsList = logsRealtime.subscribe('logs_list', (payload) => {
+      const list = Array.isArray(payload.logs) ? payload.logs : [];
+      list.slice().reverse().forEach((log) => addLog(log));
+    });
+
+    const unsubLog = logsRealtime.subscribe('thought_log', (log) => {
+      addLog(log);
+    });
+
+    return () => {
+      unsubLogsList();
+      unsubLog();
+    };
+  }, [logsRealtime, addLog]);
 
   return (
     <div className="flex flex-col h-full bg-black">

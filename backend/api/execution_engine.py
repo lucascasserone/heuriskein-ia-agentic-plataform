@@ -6,6 +6,8 @@ Designed to run in a background thread (non-blocking).
 
 import threading
 from django.utils import timezone
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
 
 
 # ──────────────────────────────────────────────────────────────
@@ -71,14 +73,66 @@ def _log(agent, task, message: str, level: str = "info"):
     """Create a ThoughtLog entry safely."""
     try:
         from api.models import ThoughtLog
-        ThoughtLog.objects.create(
+        log = ThoughtLog.objects.create(
             agent=agent,
             task=task,
             message=message,
             level=level,
         )
+        _broadcast(
+            'thought_logs',
+            'thought_log_received',
+            {
+                'agent_id': str(agent.id) if agent else None,
+                'agent_name': agent.name if agent else 'System',
+                'message': message,
+                'level': level,
+                'timestamp': log.timestamp.isoformat(),
+            },
+        )
     except Exception:
         pass  # Never crash the engine on a logging failure
+
+
+def _broadcast(group: str, event_type: str, payload: dict):
+    """Broadcast event to channels group if channel layer is available."""
+    try:
+        channel_layer = get_channel_layer()
+        if channel_layer is None:
+            return
+        async_to_sync(channel_layer.group_send)(group, {'type': event_type, **payload})
+    except Exception:
+        pass
+
+
+def _broadcast_task(task):
+    _broadcast(
+        'tasks_updates',
+        'task_updated',
+        {
+            'task_id': str(task.id),
+            'data': {
+                'status': task.status,
+                'error': task.error,
+                'result': task.result,
+                'assigned_to': str(task.assigned_to_id) if task.assigned_to_id else None,
+                'attempt_count': task.attempt_count,
+            },
+        },
+    )
+
+
+def _broadcast_agent(agent):
+    if not agent:
+        return
+    _broadcast(
+        'agents_updates',
+        'agent_status_changed',
+        {
+            'agent_id': str(agent.id),
+            'state': agent.state,
+        },
+    )
 
 
 # ──────────────────────────────────────────────────────────────
@@ -105,6 +159,7 @@ def _run_task(task_id: str):
         agent.state = "thinking"
         agent.last_activity = timezone.now()
         agent.save(update_fields=["state", "last_activity"])
+        _broadcast_agent(agent)
 
     _log(agent, task, f"🧠 Analisando tarefa: {task.title}")
 
@@ -124,6 +179,7 @@ def _run_task(task_id: str):
         agent.state = "executing"
         agent.last_activity = timezone.now()
         agent.save(update_fields=["state", "last_activity"])
+        _broadcast_agent(agent)
 
     _log(agent, task, "⚙️ Enviando tarefa para Claude...")
 
@@ -144,12 +200,14 @@ def _run_task(task_id: str):
     task.result = result
     task.completed_at = timezone.now()
     task.save(update_fields=["status", "result", "completed_at"])
+    _broadcast_task(task)
 
     if agent:
         agent.state = "idle"
         agent.current_task = None
         agent.last_activity = timezone.now()
         agent.save(update_fields=["state", "current_task", "last_activity"])
+        _broadcast_agent(agent)
 
     _log(agent, task, "✅ Tarefa concluída com sucesso.")
 
@@ -160,12 +218,14 @@ def _fail_task(task, agent, error_msg: str):
     task.error = error_msg
     task.completed_at = timezone.now()
     task.save(update_fields=["status", "error", "completed_at"])
+    _broadcast_task(task)
 
     if agent:
         agent.state = "error" if "error" in [s[0] for s in agent._meta.model.AGENT_STATES] else "idle"
         agent.current_task = None
         agent.last_activity = timezone.now()
         agent.save(update_fields=["state", "current_task", "last_activity"])
+        _broadcast_agent(agent)
 
     _log(agent, task, f"❌ Falha na execução: {error_msg}", level="error")
 
