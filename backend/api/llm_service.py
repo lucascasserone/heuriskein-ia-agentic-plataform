@@ -6,7 +6,7 @@ Handles model inference, streaming, and token counting
 import os
 from typing import AsyncGenerator, Generator, Optional
 from abc import ABC, abstractmethod
-from decouple import config
+from django.conf import settings
 
 try:
     from anthropic import Anthropic, AsyncAnthropic
@@ -42,12 +42,19 @@ class ClaudeProvider(LLMProvider):
         if not HAS_ANTHROPIC:
             raise ImportError("anthropic package not installed")
         
-        api_key = config('ANTHROPIC_API_KEY', default='')
+        api_key = getattr(settings, 'ANTHROPIC_API_KEY', '') or os.environ.get('ANTHROPIC_API_KEY', '')
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY not configured in environment")
         
-        self.model = config('CLAUDE_MODEL', default='claude-3-5-sonnet-20241022')
+        self.model = getattr(settings, 'CLAUDE_MODEL', 'claude-3-5-sonnet-20241022')
         self.client = Anthropic(api_key=api_key)
+
+    def _resolve_model(self, requested_model: str, error_text: str) -> str:
+        """Fallback to a stable alias when Anthropic returns model-not-found."""
+        if 'not_found_error' in error_text or 'model:' in error_text:
+            if requested_model != 'claude-3-5-sonnet-latest':
+                return 'claude-3-5-sonnet-latest'
+        return requested_model
     
     def chat(self, messages: list[dict], system: Optional[str] = None) -> str:
         """Get non-streaming response from Claude"""
@@ -60,6 +67,19 @@ class ClaudeProvider(LLMProvider):
             )
             return response.content[0].text
         except Exception as e:
+            fallback_model = self._resolve_model(self.model, str(e))
+            if fallback_model != self.model:
+                try:
+                    response = self.client.messages.create(
+                        model=fallback_model,
+                        max_tokens=2048,
+                        system=system or "You are a helpful AI assistant analyzing tasks and providing insights.",
+                        messages=messages,
+                    )
+                    self.model = fallback_model
+                    return response.content[0].text
+                except Exception as e2:
+                    raise Exception(f"Claude API error: {str(e2)}")
             raise Exception(f"Claude API error: {str(e)}")
     
     def stream_chat(self, messages: list[dict], system: Optional[str] = None) -> Generator[str, None, None]:
@@ -74,6 +94,22 @@ class ClaudeProvider(LLMProvider):
                 for text in stream.text_stream:
                     yield text
         except Exception as e:
+            fallback_model = self._resolve_model(self.model, str(e))
+            if fallback_model != self.model:
+                try:
+                    with self.client.messages.stream(
+                        model=fallback_model,
+                        max_tokens=2048,
+                        system=system or "You are a helpful AI assistant analyzing tasks and providing insights.",
+                        messages=messages,
+                    ) as stream:
+                        self.model = fallback_model
+                        for text in stream.text_stream:
+                            yield text
+                    return
+                except Exception as e2:
+                    yield f"Error: {str(e2)}"
+                    return
             yield f"Error: {str(e)}"
 
 
@@ -84,11 +120,11 @@ class OpenAIProvider(LLMProvider):
         if not HAS_OPENAI:
             raise ImportError("openai package not installed")
         
-        api_key = config('OPENAI_API_KEY', default='')
+        api_key = getattr(settings, 'OPENAI_API_KEY', '') or os.environ.get('OPENAI_API_KEY', '')
         if not api_key:
             raise ValueError("OPENAI_API_KEY not configured in environment")
         
-        self.model = config('OPENAI_MODEL', default='gpt-4')
+        self.model = getattr(settings, 'OPENAI_MODEL', 'gpt-4')
         self.client = OpenAI(api_key=api_key)
     
     def chat(self, messages: list[dict], system: Optional[str] = None) -> str:
@@ -138,7 +174,7 @@ class LLMService:
     """Unified LLM service that manages provider selection"""
     
     def __init__(self):
-        provider_name = config('LLM_PROVIDER', default='anthropic')
+        provider_name = getattr(settings, 'LLM_PROVIDER', 'anthropic')
         
         if provider_name == 'anthropic':
             try:

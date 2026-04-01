@@ -1,9 +1,12 @@
 import os
 from pathlib import Path
-from decouple import config, Csv
+from decouple import AutoConfig, Csv
 
 # Build paths inside the project
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Force decouple to read environment from backend/.env regardless of current working directory
+config = AutoConfig(search_path=str(BASE_DIR))
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = config('DJANGO_SECRET_KEY', default='django-insecure-dev-key-change-in-production')
@@ -198,3 +201,6 @@ CACHES = {
 # LLM APIs
 ANTHROPIC_API_KEY = config('ANTHROPIC_API_KEY', default='')
 OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
+LLM_PROVIDER = config('LLM_PROVIDER', default='anthropic')
+CLAUDE_MODEL = config('CLAUDE_MODEL', default='claude-3-5-sonnet-20241022')
+OPENAI_MODEL = config('OPENAI_MODEL', default='gpt-4')
