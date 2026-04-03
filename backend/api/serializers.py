@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth.models import User
-from api.models import Agent, Task, Epic, ThoughtLog, ChatMessage
+from api.models import Agent, Task, Epic, ThoughtLog, ChatMessage, ClarificationRequest
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -92,6 +92,8 @@ class TaskSerializer(serializers.ModelSerializer):
     
     assigned_to_name = serializers.CharField(source='assigned_to.name', read_only=True)
     epic_goal = serializers.CharField(source='epic.goal', read_only=True)
+    pending_clarification = serializers.SerializerMethodField()
+    latest_question = serializers.SerializerMethodField()
     
     class Meta:
         model = Task
@@ -99,9 +101,34 @@ class TaskSerializer(serializers.ModelSerializer):
             'id', 'title', 'description', 'epic', 'epic_goal',
             'status', 'priority', 'assigned_to', 'assigned_to_name',
             'attempt_count', 'result', 'error',
+            'pending_clarification', 'latest_question',
             'created_at', 'updated_at', 'started_at', 'completed_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_pending_clarification(self, obj):
+        return obj.clarification_requests.filter(status='pending').exists()
+
+    def get_latest_question(self, obj):
+        req = obj.clarification_requests.filter(status='pending').order_by('-created_at').first()
+        return req.question if req else ''
+
+
+class ClarificationRequestSerializer(serializers.ModelSerializer):
+    """Serializador para solicitações de esclarecimento"""
+
+    task_title = serializers.CharField(source='task.title', read_only=True)
+    agent_name = serializers.CharField(source='agent.name', read_only=True)
+    answered_by_name = serializers.CharField(source='answered_by.username', read_only=True)
+
+    class Meta:
+        model = ClarificationRequest
+        fields = [
+            'id', 'task', 'task_title', 'agent', 'agent_name',
+            'question', 'answer', 'status', 'answered_by', 'answered_by_name',
+            'answered_at', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'answered_at']
 
 
 class ThoughtLogSerializer(serializers.ModelSerializer):

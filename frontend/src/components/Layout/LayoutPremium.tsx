@@ -12,6 +12,8 @@ interface LayoutProps {
 }
 
 export default function Layout({ children }: LayoutProps) {
+  const [leftCollapsed, setLeftCollapsed] = useState(false);
+  const [leftBeforeFocus, setLeftBeforeFocus] = useState<boolean | null>(null);
   // Auth state from store
   const isLoginModalOpen = useAppStore((state) => state.isLoginModalOpen);
   const isAuthenticated = useAppStore((state) => state.isAuthenticated);
@@ -24,13 +26,55 @@ export default function Layout({ children }: LayoutProps) {
   useEffect(() => {
     const storedAccessToken = localStorage.getItem('accessToken');
     const storedRefreshToken = localStorage.getItem('refreshToken');
+    const storedLeftCollapsed = localStorage.getItem('left_sidebar_collapsed');
     
     if (storedAccessToken && storedRefreshToken) {
       setTokens(storedAccessToken, storedRefreshToken);
       // Set authorization header
       apiClient.defaults.headers.common['Authorization'] = `Bearer ${storedAccessToken}`;
     }
+
+    if (storedLeftCollapsed !== null) {
+      setLeftCollapsed(storedLeftCollapsed === '1');
+    }
   }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('left_sidebar_collapsed', leftCollapsed ? '1' : '0');
+    } catch {
+      // Ignore localStorage access errors.
+    }
+  }, [leftCollapsed]);
+
+  useEffect(() => {
+    const onFocusMode = (evt: Event) => {
+      const custom = evt as CustomEvent<{ enabled?: boolean }>;
+      const enabled = !!custom?.detail?.enabled;
+      if (enabled) {
+        setLeftBeforeFocus((prev) => (prev === null ? leftCollapsed : prev));
+        setLeftCollapsed(true);
+      } else {
+        setLeftCollapsed((prev) => (leftBeforeFocus === null ? prev : leftBeforeFocus));
+        setLeftBeforeFocus(null);
+      }
+    };
+
+    window.addEventListener('workspace:focus-mode', onFocusMode as EventListener);
+
+    const onPreferenceChanged = (evt: Event) => {
+      const custom = evt as CustomEvent<{ key?: string; value?: boolean }>;
+      if (custom?.detail?.key === 'left_sidebar_collapsed') {
+        setLeftCollapsed(!!custom.detail.value);
+      }
+    };
+
+    window.addEventListener('ui:preference-changed', onPreferenceChanged as EventListener);
+    return () => {
+      window.removeEventListener('workspace:focus-mode', onFocusMode as EventListener);
+      window.removeEventListener('ui:preference-changed', onPreferenceChanged as EventListener);
+    };
+  }, [leftCollapsed, leftBeforeFocus]);
 
   // Save tokens to localStorage when they change
   useEffect(() => {
@@ -58,7 +102,10 @@ export default function Layout({ children }: LayoutProps) {
     <ToastProvider>
       <div className="flex h-screen bg-dark text-white overflow-hidden">
         {/* Sidebar */}
-        <SidebarPremium />
+        <SidebarPremium
+          collapsed={leftCollapsed}
+          onToggleCollapse={() => setLeftCollapsed((prev) => !prev)}
+        />
 
         {/* Main Content */}
         <div className="flex-1 flex flex-col overflow-hidden">

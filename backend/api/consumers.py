@@ -3,6 +3,7 @@ from channels.generic.websocket import AsyncWebsocketConsumer
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from api.models import Task, Agent, ThoughtLog, Epic
+from api.epic_decomposition import ensure_epic_task_queue
 
 
 class TaskConsumer(AsyncWebsocketConsumer):
@@ -345,10 +346,13 @@ class EpicUpdateConsumer(AsyncWebsocketConsumer):
     def update_epic(self, epic_id, update_data):
         try:
             epic = Epic.objects.get(id=epic_id)
+            previous_status = epic.status
             for field, value in update_data.items():
                 if hasattr(epic, field):
                     setattr(epic, field, value)
             epic.save()
+            if previous_status != 'approved' and epic.status == 'approved':
+                ensure_epic_task_queue(epic)
         except Epic.DoesNotExist:
             pass
 

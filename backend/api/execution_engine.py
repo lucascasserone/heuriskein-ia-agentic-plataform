@@ -40,6 +40,20 @@ def build_task_prompt(task) -> str:
 **Prioridade:** {task.epic.priority}
 """
 
+    clarification_ctx = ""
+    try:
+        latest = task.clarification_requests.filter(status='answered').order_by('-answered_at', '-created_at').first()
+        if latest:
+            clarification_ctx = f"""
+## Esclarecimento do Piloto
+**Pergunta da IA:** {latest.question}
+**Resposta do piloto:** {latest.answer}
+
+Use explicitamente esse esclarecimento para orientar a execução.
+"""
+    except Exception:
+        clarification_ctx = ""
+
     return f"""# Tarefa para Execução
 
 **Título:** {task.title}
@@ -47,6 +61,7 @@ def build_task_prompt(task) -> str:
 **Prioridade:** {task.priority}
 **Tentativa:** #{task.attempt_count}
 {epic_ctx}
+{clarification_ctx}
 
 ## Instruções
 Execute esta tarefa completamente. Estruture sua resposta como:

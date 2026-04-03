@@ -90,6 +90,7 @@ class Task(models.Model):
     STATUS_CHOICES = [
         ('queue', 'Fila'),
         ('processing', 'Processando'),
+        ('blocked', 'Bloqueada'),
         ('review', 'Revisão'),
         ('completed', 'Completado'),
         ('failed', 'Falhou'),
@@ -179,3 +180,32 @@ class ChatMessage(models.Model):
         ordering = ['-created_at']
         verbose_name = 'Mensagem de Chat'
         verbose_name_plural = 'Mensagens de Chat'
+
+
+class ClarificationRequest(models.Model):
+    """Solicitação de esclarecimento ao piloto (human-in-the-loop)."""
+
+    STATUS_CHOICES = [
+        ('pending', 'Pendente'),
+        ('answered', 'Respondida'),
+        ('expired', 'Expirada'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name='clarification_requests')
+    agent = models.ForeignKey(Agent, on_delete=models.SET_NULL, null=True, blank=True)
+    question = models.TextField(help_text='Pergunta da IA para o piloto')
+    answer = models.TextField(blank=True, help_text='Resposta do piloto')
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='pending')
+    answered_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    answered_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Solicitação de Esclarecimento'
+        verbose_name_plural = 'Solicitações de Esclarecimento'
+
+    def __str__(self):
+        return f"Clarification {self.id} ({self.status})"
