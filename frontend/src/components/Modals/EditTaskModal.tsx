@@ -11,7 +11,7 @@ interface Task {
   title: string;
   description?: string;
   priority: 'low' | 'medium' | 'high';
-  status: 'queue' | 'processing' | 'review' | 'completed' | 'failed';
+  status: 'queue' | 'processing' | 'blocked' | 'review' | 'completed' | 'failed';
   epic?: string | null;
 }
 
@@ -214,6 +214,7 @@ export default function EditTaskModal({ isOpen, task, onClose, onSuccess }: Edit
                 >
                   <option value="queue">Fila</option>
                   <option value="processing">Processando</option>
+                  <option value="blocked">Aprovação</option>
                   <option value="review">QA</option>
                   <option value="completed">Finalizado</option>
                   <option value="failed">Falhou</option>

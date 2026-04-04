@@ -28,7 +28,7 @@ interface TaskState {
   title: string;
   description: string;
   epic: string | null;
-  status: 'queue' | 'processing' | 'review' | 'completed' | 'failed';
+  status: 'queue' | 'processing' | 'blocked' | 'review' | 'completed' | 'failed';
   priority: 'low' | 'medium' | 'high';
   assigned_to: string | null;
 }

@@ -1037,9 +1037,21 @@ function DragDropCard({ item, type, status, cardStyle, onStatusChange, onTaskAct
       {type === 'task' && taskItem && (
         <div className="flex items-center justify-between gap-2 mb-1.5 min-w-0">
           <div className="flex items-center gap-1 text-[10px] text-gray-light min-w-0">
-            {toolHints.includes('search') && <Globe size={11} className="text-cyan-300" title="Pesquisa/Web" />}
-            {toolHints.includes('code') && <Code2 size={11} className="text-violet-300" title="Código" />}
-            {toolHints.includes('ops') && <Wrench size={11} className="text-amber-300" title="Ops/QA" />}
+            {toolHints.includes('search') && (
+              <span title="Pesquisa/Web">
+                <Globe size={11} className="text-cyan-300" />
+              </span>
+            )}
+            {toolHints.includes('code') && (
+              <span title="Código">
+                <Code2 size={11} className="text-violet-300" />
+              </span>
+            )}
+            {toolHints.includes('ops') && (
+              <span title="Ops/QA">
+                <Wrench size={11} className="text-amber-300" />
+              </span>
+            )}
             {toolHints.length === 0 && <span className="text-[10px] text-gray-dim">sem ferramentas detectadas</span>}
           </div>
           <span className="text-[10px] font-mono text-emerald-300/90 whitespace-nowrap" title="Custo estimado por tarefa">

@@ -10,8 +10,8 @@ import { useNotify } from '@/lib/toast';
 interface Task {
   id: string;
   title: string;
-  status: string;
-  priority: string;
+  status: 'queue' | 'processing' | 'blocked' | 'review' | 'completed' | 'failed';
+  priority: 'low' | 'medium' | 'high';
   assigned_to?: string;
   epic?: string;
   created_at?: string;
@@ -20,10 +20,13 @@ interface Task {
 interface Epic {
   id: string;
   goal: string;
-  status: string;
-  priority: string;
+  status: 'backlog' | 'refinement' | 'approved' | 'completed' | 'failed';
+  priority: 'low' | 'medium' | 'high';
   created_at?: string;
 }
+
+type TaskStatus = Task['status'];
+type EpicStatus = Epic['status'];
 
 // Planning Board (Epics) - Blueprint Style
 const planningStatuses = [
@@ -85,16 +88,16 @@ export default function DualKanbanDragDrop() {
 
   const handleDragEnd = async (
     item: Epic | Task,
-    newStatus: string,
+    newStatus: TaskStatus | EpicStatus,
     type: 'epic' | 'task'
   ) => {
     try {
       notify.loading('Atualizando status...');
 
       if (type === 'epic') {
-        await apiClient.updateEpic(item.id, { status: newStatus });
+        await apiClient.updateEpic(item.id, { status: newStatus as EpicStatus });
       } else {
-        await apiClient.updateTask(item.id, { status: newStatus });
+        await apiClient.updateTask(item.id, { status: newStatus as TaskStatus });
       }
 
       notify.success(`Status atualizado para "${newStatus}"`);
@@ -158,7 +161,7 @@ export default function DualKanbanDragDrop() {
                 items={epics[key] || []}
                 type="epic"
                 cardStyle="blueprint"
-                onDragEnd={(item) => handleDragEnd(item, key, 'epic')}
+                onDragEnd={(item) => handleDragEnd(item, key as EpicStatus, 'epic')}
               />
             ))}
           </div>
@@ -186,7 +189,7 @@ export default function DualKanbanDragDrop() {
                 items={tasks[key] || []}
                 type="task"
                 cardStyle="vivo"
-                onDragEnd={(item) => handleDragEnd(item, key, 'task')}
+                onDragEnd={(item) => handleDragEnd(item, key as TaskStatus, 'task')}
               />
             ))}
           </div>
