@@ -2,7 +2,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, Zap, Brain, Loader } from 'lucide-react';
-import { apiClient } from '@/lib/api';
+import { enhancedApiClient } from '@/lib/enhanced-api';
 import { useNotify } from '@/lib/toast';
 
 interface Message {
@@ -25,6 +25,7 @@ export default function LLMChatInterface() {
   ]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const notify = useNotify();
 
@@ -75,7 +76,11 @@ export default function LLMChatInterface() {
     ]);
 
     try {
-      await apiClient.streamChatMessage(
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      await enhancedApiClient.streamChatMessage(
         messageText,
         (chunk) => {
           setMessages((prev) =>
@@ -99,7 +104,9 @@ export default function LLMChatInterface() {
                 : msg
             )
           );
-        }
+        },
+        {},
+        controller.signal
       );
 
       setMessages((prev) =>
@@ -110,12 +117,37 @@ export default function LLMChatInterface() {
         )
       );
     } catch (error) {
-      console.error('Error:', error);
-      notify.error('Erro ao enviar mensagem');
+      try {
+        // Fallback: non-stream chat for environments where SSE may fail.
+        const fallback = await enhancedApiClient.sendChatMessage('', messageText, {});
+        const responseText =
+          fallback.data?.agent_response ||
+          fallback.data?.message ||
+          'Recebi sua mensagem, mas não consegui gerar uma resposta completa agora.';
+
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === streamingId
+              ? { ...msg, content: responseText, isStreaming: false }
+              : msg
+          )
+        );
+        notify.info('Resposta entregue via fallback');
+      } catch {
+        console.error('Error:', error);
+        notify.error('Erro ao enviar mensagem');
+      }
     } finally {
+      abortRef.current = null;
       setIsLoading(false);
     }
   };
+
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, []);
 
   return (
     <div className="flex flex-col h-full bg-dark rounded-xl border border-primary/10 overflow-hidden shadow-lg">
