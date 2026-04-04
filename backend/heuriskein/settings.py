@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from decouple import AutoConfig, Csv
+from urllib.parse import urlparse, unquote
 
 # Build paths inside the project
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -72,15 +73,18 @@ ASGI_APPLICATION = 'heuriskein.asgi.application'
 # Padrão: SQLite (desenvolvimento local)
 # Para PostgreSQL, mude ENGINE e configure os parâmetros abaixo
 
-if config('DATABASE_URL', default='').startswith('postgresql'):
+database_url = config('DATABASE_URL', default='')
+
+if database_url.startswith('postgresql') or database_url.startswith('postgres'):
+    parsed = urlparse(database_url)
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.postgresql',
-            'NAME': config('DB_NAME', default='heuriskein_db'),
-            'USER': config('DB_USER', default='postgres'),
-            'PASSWORD': config('DB_PASSWORD', default='postgres'),
-            'HOST': config('DB_HOST', default='localhost'),
-            'PORT': config('DB_PORT', default='5432'),
+            'NAME': config('DB_NAME', default=(parsed.path or '/heuriskein_db').lstrip('/')),
+            'USER': config('DB_USER', default=unquote(parsed.username or 'postgres')),
+            'PASSWORD': config('DB_PASSWORD', default=unquote(parsed.password or 'postgres')),
+            'HOST': config('DB_HOST', default=parsed.hostname or 'localhost'),
+            'PORT': config('DB_PORT', default=str(parsed.port or '5432')),
         }
     }
 else:
@@ -160,18 +164,23 @@ SIMPLE_JWT = {
 }
 
 # CORS
-CORS_ALLOWED_ORIGINS = [
-    'http://localhost:3000',
-    'http://localhost:8000',
-    'http://127.0.0.1:3000',
-    'http://127.0.0.1:8000',
-]
+CORS_ALLOWED_ORIGINS = config(
+    'CORS_ALLOWED_ORIGINS',
+    default='http://localhost:3000,http://localhost:8000,http://127.0.0.1:3000,http://127.0.0.1:8000',
+    cast=Csv(),
+)
 
 # Em desenvolvimento, permite qualquer origem para evitar bloqueios de CORS
 if DEBUG:
     CORS_ALLOW_ALL_ORIGINS = True
 
 CORS_ALLOW_CREDENTIALS = True
+
+CSRF_TRUSTED_ORIGINS = config('CSRF_TRUSTED_ORIGINS', default='', cast=Csv())
+
+if not DEBUG:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    USE_X_FORWARDED_HOST = True
 
 # Channels
 # Apenas para produção/desenvolvimento avançado
