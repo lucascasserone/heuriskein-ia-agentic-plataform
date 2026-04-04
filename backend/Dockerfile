@@ -19,4 +19,7 @@ RUN mkdir -p staticfiles media
 
 EXPOSE 8001
 
-CMD ["daphne", "-b", "0.0.0.0", "-p", "8001", "heuriskein.asgi:application"]
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
+
+CMD ["/app/start.sh"]

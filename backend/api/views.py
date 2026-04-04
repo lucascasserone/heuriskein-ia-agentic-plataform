@@ -797,11 +797,21 @@ class HealthCheckAPIView(APIView):
     permission_classes = []
     
     def get(self, request):
+        try:
+            agents = Agent.objects.count()
+            tasks = Task.objects.count()
+            epics = Epic.objects.count()
+            db_status = 'ok'
+        except Exception:
+            agents = tasks = epics = 0
+            db_status = 'unavailable'
+
         return Response({
             'status': 'healthy',
-            'agents': Agent.objects.count(),
-            'tasks': Task.objects.count(),
-            'epics': Epic.objects.count(),
+            'db': db_status,
+            'agents': agents,
+            'tasks': tasks,
+            'epics': epics,
         })
 
 
