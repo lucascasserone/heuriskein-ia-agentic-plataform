@@ -1,10 +1,12 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo, useCallback } from 'react';
 import Link from 'next/link';
 import { Bot, Clock3, Gauge, ListChecks, AlertTriangle } from 'lucide-react';
 import LayoutPremium from '@/components/Layout/LayoutPremium';
 import { apiClient, MetricsOverview } from '@/lib/api';
+import { enhancedApiClient } from '@/lib/enhanced-api';
+import { withRetry } from '@/lib/api-utils';
 
 interface StatusMap {
   [key: string]: number;
@@ -16,35 +18,38 @@ export default function DashboardPage() {
   const [epicByStatus, setEpicByStatus] = useState<StatusMap>({});
   const [activeAgents, setActiveAgents] = useState<number>(0);
   const [healthUp, setHealthUp] = useState<boolean>(false);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [metricsRes, tasksRes, epicsRes, agentsRes] = await Promise.all([
+        enhancedApiClient.getMetricsOverview(),
+        enhancedApiClient.getTasksByStatus(),
+        enhancedApiClient.getEpicsByStatus(),
+        enhancedApiClient.getActiveAgents(),
+      ]);
+
+      setMetrics(metricsRes.data || null);
+      setTaskByStatus(tasksRes.data || {});
+      setEpicByStatus(epicsRes.data || {});
+
+      const list = agentsRes.data?.results || agentsRes.data || [];
+      setActiveAgents(Array.isArray(list) ? list.length : 0);
+      setHealthUp(true);
+      setLastUpdated(new Date());
+    } catch (err: any) {
+      setError(err.message || 'Erro ao carregar dados');
+      setHealthUp(false);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const [metricsRes, tasksRes, epicsRes, healthRes, agentsRes] = await Promise.all([
-          apiClient.getMetricsOverview(),
-          apiClient.getTasksByStatus(),
-          apiClient.getEpicsByStatus(),
-          apiClient.get('/health/'),
-          apiClient.getActiveAgents(),
-        ]);
-
-        setMetrics(metricsRes.data || null);
-        setTaskByStatus(tasksRes.data || {});
-        setEpicByStatus(epicsRes.data || {});
-        setHealthUp(Boolean(healthRes.data?.status === 'healthy' || healthRes.status === 200));
-
-        const list = agentsRes.data?.results || agentsRes.data || [];
-        setActiveAgents(Array.isArray(list) ? list.length : 0);
-        setLastUpdated(new Date());
-      } catch {
-        setHealthUp(false);
-      } finally {
-        setLoading(false);
-      }
-    };
-
     fetchData();
 
     const interval = window.setInterval(fetchData, 15000);
@@ -98,6 +103,19 @@ export default function DashboardPage() {
 
         {loading ? (
           <div className="text-sm text-gray-light">Carregando indicadores...</div>
+        ) : error ? (
+          <div className="rounded-xl border border-red-400/30 bg-red-500/10 p-4 text-red-300 text-sm">
+            <div className="flex items-center gap-2">
+              <AlertTriangle size={16} />
+              <span>{error}</span>
+              <button
+                onClick={fetchData}
+                className="ml-auto px-3 py-1 bg-red-600/20 hover:bg-red-600/30 rounded border border-red-400/40 text-xs"
+              >
+                Tentar novamente
+              </button>
+            </div>
+          </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
             {kpis.map((kpi) => (

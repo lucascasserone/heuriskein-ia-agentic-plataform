@@ -12,6 +12,13 @@ from api.views import (
     RegisterAPIView, LoginAPIView, UserDetailAPIView,
     ClarificationRequestViewSet, MetricsOverviewAPIView, MetricsTimeseriesAPIView
 )
+from api.autonomous_org import (
+    OrgHireAPIView,
+    OrgMissionAPIView,
+    OrgStateAPIView,
+    OrgFeasibilityAPIView,
+    OrgTemplateAPIView,
+)
 
 router = DefaultRouter()
 router.register(r'agents', AgentViewSet, basename='agent')
@@ -26,6 +33,11 @@ urlpatterns = [
     path('api/v1/metrics/overview/', MetricsOverviewAPIView.as_view(), name='metrics-overview'),
     path('api/v1/metrics/timeseries/', MetricsTimeseriesAPIView.as_view(), name='metrics-timeseries'),
     path('api/v1/chat/', ChatAPIView.as_view(), name='chat'),
+    path('api/v1/org/agents/hire/', OrgHireAPIView.as_view(), name='org-hire-agent'),
+    path('api/v1/org/agents/template/', OrgTemplateAPIView.as_view(), name='org-agent-template'),
+    path('api/v1/org/mission/execute/', OrgMissionAPIView.as_view(), name='org-run-mission'),
+    path('api/v1/org/mission/feasibility/', OrgFeasibilityAPIView.as_view(), name='org-mission-feasibility'),
+    path('api/v1/org/state/', OrgStateAPIView.as_view(), name='org-state'),
     path('api/v1/auth/register/', RegisterAPIView.as_view(), name='register'),
     path('api/v1/auth/login/', LoginAPIView.as_view(), name='login'),
     path('api/v1/auth/user/', UserDetailAPIView.as_view(), name='user-detail'),

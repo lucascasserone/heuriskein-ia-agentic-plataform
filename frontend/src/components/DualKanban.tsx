@@ -46,7 +46,7 @@ const priorityColors = {
 export default function DualKanban() {
   const [epics, setEpics] = useState<{ [key: string]: Epic[] }>({});
   const [tasks, setTasks] = useState<{ [key: string]: Task[] }>({});
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     fetchData();
@@ -210,7 +210,7 @@ interface CardProps {
 function KanbanCard({ item, type, isProcessing, status }: CardProps) {
   const title = 'goal' in item ? item.goal : item.title;
   const priority = item.priority || 'medium';
-  const colors = priorityColors[priority as keyof typeof priorityColors];
+  const colors = priorityColors[priority as keyof typeof priorityColors] || priorityColors.medium;
 
   const getProgressBar = () => {
     if (type === 'epic') {

@@ -29,7 +29,7 @@ export default function AnalyticsPage() {
   const [seriesDays, setSeriesDays] = useState<7 | 14 | 30>(14);
   const [series, setSeries] = useState<MetricsTimeseriesPoint[]>([]);
   const [seriesUnavailable, setSeriesUnavailable] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     const load = async () => {

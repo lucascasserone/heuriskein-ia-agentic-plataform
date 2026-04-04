@@ -12,6 +12,7 @@ import {
   LogIn,
   BarChart3,
   Bot,
+  GitBranch,
   PanelLeftClose,
   PanelLeftOpen,
 } from 'lucide-react';
@@ -157,6 +158,7 @@ export default function Sidebar({ collapsed = false, onToggleCollapse }: Sidebar
           <NavItem icon={<Home size={18} />} label="Dashboard" href="/dashboard" active={isActivePath(pathname, '/dashboard')} collapsed={collapsed} />
           <NavItem icon={<Zap size={18} />} label="Execução" href="/execucao" active={isActivePath(pathname, '/execucao')} collapsed={collapsed} />
           <NavItem icon={<BarChart3 size={18} />} label="Analytics" href="/analytics" active={isActivePath(pathname, '/analytics')} collapsed={collapsed} />
+          <NavItem icon={<GitBranch size={18} />} label="Organização" href="/organizacao" active={isActivePath(pathname, '/organizacao')} collapsed={collapsed} />
           <NavItem icon={<MessageSquare size={18} />} label="Chat" href="/chat" active={isActivePath(pathname, '/chat')} collapsed={collapsed} />
           <NavItem icon={<Settings size={18} />} label="Configurações" href="/configuracoes" active={isActivePath(pathname, '/configuracoes')} collapsed={collapsed} />
         </nav>

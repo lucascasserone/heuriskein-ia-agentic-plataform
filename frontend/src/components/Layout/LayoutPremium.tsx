@@ -4,6 +4,7 @@ import React, { ReactNode, useState, useEffect } from 'react';
 import SidebarPremium from './SidebarPremium';
 import LoginModal from '@/components/Modals/LoginModal';
 import { ToastProvider } from '@/lib/toast';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { useAppStore } from '@/store/appStore';
 import { apiClient } from '@/lib/api';
 
@@ -109,7 +110,9 @@ export default function Layout({ children }: LayoutProps) {
 
         {/* Main Content */}
         <div className="flex-1 flex flex-col overflow-hidden">
-          {children}
+          <ErrorBoundary>
+            {children}
+          </ErrorBoundary>
         </div>
 
         {/* Login Modal */}

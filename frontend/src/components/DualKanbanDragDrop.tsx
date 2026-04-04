@@ -79,7 +79,7 @@ const statusDots = {
 export default function DualKanbanDragDrop() {
   const [epics, setEpics] = useState<{ [key: string]: Epic[] }>({});
   const [tasks, setTasks] = useState<{ [key: string]: Task[] }>({});
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [showFlowGraph, setShowFlowGraph] = useState(false);
   const [compactMode, setCompactMode] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
@@ -914,10 +914,10 @@ interface CardProps {
   compactMode: boolean;
 }
 
-function DragDropCard({ item, type, status, cardStyle, onStatusChange, onTaskAction, onEdit, onDelete, compactMode }: CardProps) {
+const DragDropCard = React.memo(function DragDropCard({ item, type, status, cardStyle, onStatusChange, onTaskAction, onEdit, onDelete, compactMode }: CardProps) {
   const title = 'goal' in item ? item.goal : item.title;
   const priority = item.priority || 'medium';
-  const colors = priorityColors[priority as keyof typeof priorityColors];
+  const colors = priorityColors[priority as keyof typeof priorityColors] || priorityColors.medium;
   const isTask = type === 'task';
   const taskItem = isTask ? (item as Task) : null;
   const isFailedTask = !!taskItem && taskItem.status === 'failed';
@@ -1255,4 +1255,9 @@ function DragDropCard({ item, type, status, cardStyle, onStatusChange, onTaskAct
       </div>
     </motion.div>
   );
-}
+}, (prevProps, nextProps) => {
+  // Custom comparison: only re-render if item ID or status changes
+  return prevProps.item.id === nextProps.item.id && 
+         prevProps.status === nextProps.status &&
+         prevProps.compactMode === nextProps.compactMode;
+});

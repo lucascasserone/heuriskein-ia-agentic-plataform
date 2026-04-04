@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import 'reactflow/dist/style.css';
 
 export const metadata: Metadata = {
   title: 'Heuriskein IA',
