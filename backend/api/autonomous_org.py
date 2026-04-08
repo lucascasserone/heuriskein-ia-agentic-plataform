@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional, TypedDict
 
 from django.db import transaction
+from django.utils import timezone as dj_timezone
 from rest_framework import serializers, status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -29,7 +30,8 @@ except ImportError:
     StateGraph = None
     HAS_LANGGRAPH = False
 
-from api.models import Agent
+from api.models import Agent, Epic, Task
+from api.llm_service import get_llm_service
 
 try:
     import psycopg2
@@ -46,6 +48,9 @@ except ImportError:
 
 HierarchyLevel = Literal["ceo", "director", "head", "analyst"]
 TaskStatus = Literal["queued", "in_progress", "awaiting_approval", "approved", "rejected", "done"]
+
+ORG_MISSION_MARKER = "[ORG_MISSION_ID:{mission_id}]"
+ORG_TASK_MARKER = "[ORG_TASK_ID:{task_id}]"
 
 
 class TaskNode(TypedDict):
@@ -215,6 +220,114 @@ class AgentFactory:
             "capabilities": agent.capabilities,
             "bio": str(template.get("bio") or ""),
         }
+
+
+def _map_org_status_to_task_status(status: TaskStatus) -> str:
+    mapping = {
+        "queued": "queue",
+        "in_progress": "processing",
+        "awaiting_approval": "blocked",
+        "approved": "completed",
+        "rejected": "failed",
+        "done": "completed",
+    }
+    return mapping.get(status, "queue")
+
+
+def _map_complexity_to_priority(complexity: int) -> str:
+    if complexity >= 8:
+        return "high"
+    if complexity >= 5:
+        return "medium"
+    return "low"
+
+
+def _sync_org_state_to_kanban(state: CompanyState) -> None:
+    mission_id = state["mission_id"]
+    mission_marker = ORG_MISSION_MARKER.format(mission_id=mission_id)
+
+    epic_defaults = {
+        "goal": (f"[ORG] {state['mission_brief']}")[:255],
+        "description": f"Missao sincronizada da aba Organizacao.\n{mission_marker}",
+        "status": "approved",
+        "priority": "medium",
+    }
+
+    epic, created = Epic.objects.get_or_create(
+        goal=epic_defaults["goal"],
+        defaults=epic_defaults,
+    )
+    if not created:
+        epic.description = epic.description or ""
+        if mission_marker not in epic.description:
+            epic.description = (epic.description + "\n" + mission_marker).strip()
+        if state.get("final_report"):
+            epic.status = "completed"
+        elif state.get("completed_tasks"):
+            epic.status = "approved"
+        else:
+            epic.status = "refinement"
+        epic.save(update_fields=["description", "status", "updated_at"])
+
+    if created:
+        if state.get("final_report"):
+            epic.status = "completed"
+        elif state.get("completed_tasks"):
+            epic.status = "approved"
+        else:
+            epic.status = "refinement"
+        epic.save(update_fields=["status", "updated_at"])
+
+    for org_task in state["task_tree"].values():
+        task_marker = ORG_TASK_MARKER.format(task_id=org_task["id"])
+        marker_block = f"{mission_marker} {task_marker}"
+        kanban_status = _map_org_status_to_task_status(org_task["status"])
+        assigned_agent = Agent.objects.filter(id=org_task["agent_id"]).first()
+
+        existing = Task.objects.filter(description__icontains=task_marker).order_by("-created_at").first()
+
+        execution_tail = "\n".join(org_task.get("execution_logs", [])[-3:])
+        description_parts = [
+            org_task.get("objective") or "",
+            f"Nivel: {org_task.get('level')}",
+            f"Dependencias: {', '.join(org_task.get('dependencies', [])) or '-'}",
+            f"Notas de aprovacao: {org_task.get('approval_notes') or '-'}",
+            f"{marker_block}",
+        ]
+        if execution_tail:
+            description_parts.append("Ultimos logs:\n" + execution_tail)
+        task_description = "\n\n".join([part for part in description_parts if part]).strip()
+
+        payload = {
+            "title": f"[ORG:{org_task.get('level', 'task').upper()}] {org_task.get('title', 'Task')}"[:255],
+            "description": task_description,
+            "epic": epic,
+            "assigned_to": assigned_agent,
+            "status": kanban_status,
+            "priority": _map_complexity_to_priority(int(org_task.get("complexity") or 1)),
+            "error": org_task.get("approval_notes") if kanban_status == "failed" else "",
+            "result": {
+                "org_task_id": org_task.get("id"),
+                "org_parent_id": org_task.get("parent_id"),
+                "org_level": org_task.get("level"),
+                "org_status": org_task.get("status"),
+                "org_children": org_task.get("children", []),
+                "org_mission_id": mission_id,
+            },
+        }
+
+        now = dj_timezone.now()
+        if kanban_status == "processing" and (not existing or not existing.started_at):
+            payload["started_at"] = now
+        if kanban_status in ("completed", "failed"):
+            payload["completed_at"] = now
+
+        if existing:
+            for field, value in payload.items():
+                setattr(existing, field, value)
+            existing.save()
+        else:
+            Task.objects.create(**payload)
 
 
 def _extract_number_from_text(text: str) -> Optional[float]:
@@ -640,20 +753,59 @@ def _node_delegate(state: CompanyState) -> CompanyState:
 
 def _node_execute(state: CompanyState) -> CompanyState:
     task = state["task_tree"][state["active_task_id"]]
-    task["status"] = "done"
+
+    # ── LLM execution ─────────────────────────────────────────────────────
+    agent_profile = state["agent_profiles"].get(task["agent_id"], {})
+    agent_bio = agent_profile.get("bio", "")
+    agent_caps = ", ".join(agent_profile.get("capabilities") or [])
+    mission = state.get("mission_brief", "")
+
+    prompt = f"""Você é {agent_profile.get('name', 'um agente')} ({task['level'].upper()}).
+{f'Perfil: {agent_bio}' if agent_bio else ''}
+{f'Capacidades: {agent_caps}' if agent_caps else ''}
+
+Missão da empresa: {mission}
+
+Sua tarefa:
+- Título: {task['title']}
+- Objetivo: {task['objective']}
+- Complexidade estimada: {task['complexity']}/10
+
+Contexto de contexto já executado (trace):
+{chr(10).join(state['execution_trace'][-6:]) if state.get('execution_trace') else 'Nenhum.'}
+
+Execute esta tarefa completamente. Responda em português.
+Estruture sua resposta:
+### Análise
+### Execução
+### Resultado
+### Entregável"""
+
+    llm_result = ""
+    try:
+        llm_result = get_llm_service().chat(
+            messages=[{"role": "user", "content": prompt}],
+            system=f"Você é um agente corporativo de nível {task['level']} executando uma tarefa. Seja preciso e objetivo.",
+        )
+    except Exception as exc:  # noqa: BLE001
+        llm_result = f"[LLM indisponível – execução simulada] {exc}"
+
     task["execution_logs"].append(
-        f"{_utc_now()} - Execucao concluida pelo agente {task['agent_id']}"
+        f"{_utc_now()} - Execução pelo agente {task['agent_id']}:\n{llm_result[:800]}"
     )
+    task["approval_notes"] = llm_result  # store full result for reviewer
+    # ──────────────────────────────────────────────────────────────────────
 
     if task["level"] == "ceo":
+        task["status"] = "done"
         state["completed_tasks"].append(task["id"])
-        state["final_report"] = f"Missao concluida: {state['mission_brief']}"
-        _append_trace(state, "CEO concluiu a missao sem pendencias.")
+        state["final_report"] = f"Missão concluída: {state['mission_brief']}\n\n{llm_result[:1200]}"
+        _append_trace(state, "CEO concluiu a missão.")
         return state
 
     task["status"] = "awaiting_approval"
     state["awaiting_approval_queue"].append(task["id"])
-    _append_trace(state, f"Task {task['id']} enviada para aprovacao do superior.")
+    _append_trace(state, f"Task {task['id']} enviada para aprovação do superior.")
     return state
 
 
@@ -665,18 +817,63 @@ def _node_review_by_superior(state: CompanyState) -> CompanyState:
     task = state["task_tree"][task_id]
     parent_id = task["parent_id"]
 
-    # Deterministic review rule for prototype: reject if complexity still high.
-    if task["complexity"] >= 7 and task["level"] != "analyst":
+    # ── LLM review by parent-level agent ──────────────────────────────────
+    parent_profile: dict = {}
+    if parent_id and parent_id in state["task_tree"]:
+        parent_agent_id = state["task_tree"][parent_id]["agent_id"]
+        parent_profile = state["agent_profiles"].get(parent_agent_id, {})
+
+    execution_summary = (task.get("approval_notes") or "")[:1000]
+    reviewer_name = parent_profile.get("name", "Superior")
+    reviewer_level = (state["task_tree"][parent_id]["level"] if parent_id and parent_id in state["task_tree"] else "superior").upper()
+
+    review_prompt = f"""Você é {reviewer_name} ({reviewer_level}) revisando a entrega de um subordinado.
+
+Missão: {state.get('mission_brief', '')}
+
+Tarefa entregue:
+- Título: {task['title']}
+- Objetivo: {task['objective']}
+- Complexidade: {task['complexity']}/10
+- Nível do executor: {task['level'].upper()}
+
+Resultado entregue pelo agente:
+{execution_summary or '(sem resultado registrado)'}
+
+Com base na entrega, responda com exatamente uma das palavras:
+APROVADO ou REJEITADO
+
+Em seguida, em uma nova linha, forneça feedback curto (máx 2 frases) justificando sua decisão."""
+
+    approved = True
+    feedback = "Aprovado pelo superior."
+    try:
+        review_response = get_llm_service().chat(
+            messages=[{"role": "user", "content": review_prompt}],
+            system="Você é um gestor experiente avaliando entregas da sua equipe. Seja criterioso e justo.",
+        )
+        first_line = review_response.strip().splitlines()[0].upper()
+        approved = "APROVADO" in first_line
+        # extract feedback from remaining lines
+        lines = review_response.strip().splitlines()
+        feedback = " ".join(ln.strip() for ln in lines[1:] if ln.strip())[:300] or feedback
+    except Exception as exc:  # noqa: BLE001
+        # Fallback to deterministic rule if LLM fails
+        approved = not (task["complexity"] >= 7 and task["level"] != "analyst")
+        feedback = f"[LLM indisponível – regra determinística aplicada] {exc}"
+    # ──────────────────────────────────────────────────────────────────────
+
+    if not approved:
         task["status"] = "rejected"
-        task["approval_notes"] = "Entrega insuficiente; detalhar plano e riscos antes de reenviar."
-        task["execution_logs"].append(f"{_utc_now()} - Reprovado pelo superior: {task['approval_notes']}")
+        task["approval_notes"] = feedback
+        task["execution_logs"].append(f"{_utc_now()} - Reprovado pelo superior: {feedback}")
         state["rejected_queue"].append(task_id)
-        _append_trace(state, f"Superior rejeitou task {task_id} e devolveu com feedback.")
+        _append_trace(state, f"Superior rejeitou task {task_id}: {feedback}")
         state["active_task_id"] = task_id
     else:
         task["status"] = "approved"
-        task["approval_notes"] = "Aprovado. Consolidar no nivel superior."
-        task["execution_logs"].append(f"{_utc_now()} - Aprovado pelo superior")
+        task["approval_notes"] = feedback
+        task["execution_logs"].append(f"{_utc_now()} - Aprovado pelo superior: {feedback}")
         state["completed_tasks"].append(task_id)
         _append_trace(state, f"Superior aprovou task {task_id}.")
         if parent_id and parent_id in state["task_tree"]:
@@ -843,6 +1040,7 @@ class AutonomousOrganizationService:
         result = self.graph.invoke(state)
         _compute_kpis(result)
         result["agent_profiles"] = _extract_agent_profiles(result)
+        _sync_org_state_to_kanban(result)
         self.last_state = result
 
         self.memory.store_experience(

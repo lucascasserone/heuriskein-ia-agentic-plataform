@@ -49,7 +49,7 @@ export default function LogsConsole() {
       unsubLogsList();
       unsubLog();
     };
-  }, [logsRealtime, addLog]);
+  }, [logsRealtime.subscribe, addLog]);
 
   return (
     <div className="flex flex-col h-full bg-black">

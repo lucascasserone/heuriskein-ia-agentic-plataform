@@ -24,6 +24,7 @@ from api.serializers import (
 from api.epic_decomposition import ensure_epic_task_queue
 from api.llm_service import get_llm_service
 from api.execution_engine import execute_task_async
+from api.file_sandbox import preview_file_change, apply_file_change, rollback_snapshot
 
 
 def _broadcast(group: str, event_type: str, payload: dict):
@@ -158,6 +159,60 @@ def _resolve_priority(text: str, default: str = 'medium') -> str:
 
 def _detect_chat_action(message: str) -> dict:
     raw = (message or '').strip()
+    try:
+        return _detect_chat_action_llm(raw)
+    except Exception:
+        return _detect_chat_action_regex(raw)
+
+
+def _detect_chat_action_llm(raw: str) -> dict:
+    """Use LLM to classify the user's chat message into a structured action dict."""
+    import json as _json
+
+    prompt = f"""Você é um assistente que classifica mensagens de chat de um sistema de gerenciamento de projetos.
+
+Analise a mensagem do usuário abaixo e retorne um JSON com a ação correspondente.
+
+Mensagem: "{raw}"
+
+Regras de classificação:
+- Se o usuário quer CRIAR um épico → type="create_epic", inclua: goal (string), description (string ou null), priority ("low"|"medium"|"high")
+- Se o usuário quer CRIAR uma tarefa → type="create_task", inclua: title (string), description (string ou null), priority ("low"|"medium"|"high"), status="queue"
+- Se o usuário quer ATUALIZAR STATUS de um épico → type="update_epic_status", inclua: status ("backlog"|"refinement"|"approved"|"completed"|"failed"), epic_ref (texto do objetivo), epic_id (UUID se mencionado)
+- Se o usuário quer EDITAR/ATUALIZAR dados de um épico → type="update_epic", inclua: epic_ref, epic_id, goal, description, priority (apenas os campos mencionados)
+- Se não for nenhuma das ações acima → type="none"
+
+Se algum campo obrigatório não foi mencionado pelo usuário, adicione "missing": ["campo1", ...].
+Campos obrigatórios: create_epic precisa de goal (≥8 chars); create_task precisa de title (≥5 chars); update_epic_status precisa de status e (epic_ref ou epic_id); update_epic precisa de (epic_ref ou epic_id) e pelo menos um campo a alterar.
+
+Responda APENAS com o JSON, sem explicações, sem markdown."""
+
+    import json as _json
+    response = get_llm_service().chat(
+        messages=[{"role": "user", "content": prompt}],
+        system="Você é um classificador de intenções. Responda somente com JSON válido.",
+    )
+    # strip markdown fences if present
+    cleaned = response.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("```")[1]
+        if cleaned.startswith("json"):
+            cleaned = cleaned[4:]
+    cleaned = cleaned.strip()
+    action = _json.loads(cleaned)
+    if not isinstance(action, dict) or "type" not in action:
+        return {"type": "none"}
+    # normalise priority
+    if action.get("priority") not in ("low", "medium", "high"):
+        action["priority"] = _resolve_priority(str(action.get("priority") or ""), default="medium")
+    # normalise epic status
+    if action.get("type") == "update_epic_status" and action.get("status"):
+        action["status"] = _map_epic_status(action["status"]) or action["status"]
+    return action
+
+
+def _detect_chat_action_regex(raw: str) -> dict:
+    """Original regex-based fallback for _detect_chat_action."""
     normalized = _normalize_text(raw)
     create_terms = ['criar', 'crie', 'adicione', 'adicionar', 'novo', 'nova']
     epic_terms = ['epico', 'epic']
@@ -193,23 +248,12 @@ def _detect_chat_action(message: str) -> dict:
             }
 
     if any(term in normalized for term in ['editar', 'edite', 'alterar', 'atualizar']) and any(term in normalized for term in epic_terms):
-        new_goal = _extract_field([
-            r'(?:novo\s+objetivo|objetivo|goal)\s*[:\-]\s*([^;\n]+)',
-        ], raw)
-        new_description = _extract_field([
-            r'(?:nova\s+descricao|nova\s+descrição|descricao|descrição|description)\s*[:\-]\s*([^;\n]+)',
-        ], raw)
-        priority_text = _extract_field([
-            r'(?:nova\s+prioridade|prioridade|priority)\s*[:\-]\s*([^;\n]+)',
-        ], raw)
+        new_goal = _extract_field([r'(?:novo\s+objetivo|objetivo|goal)\s*[:\-]\s*([^;\n]+)'], raw)
+        new_description = _extract_field([r'(?:nova\s+descricao|nova\s+descrição|descricao|descrição|description)\s*[:\-]\s*([^;\n]+)'], raw)
+        priority_text = _extract_field([r'(?:nova\s+prioridade|prioridade|priority)\s*[:\-]\s*([^;\n]+)'], raw)
         new_priority = _resolve_priority(priority_text, default='') if priority_text else ''
-        epic_id = _extract_field([
-            r'(?:id(?:\s+do)?\s+(?:epico|épico|epic)|(?:epico|épico|epic)\s+id|id)\s*[:\-]\s*([0-9a-fA-F\-]{36})',
-        ], raw)
-        epic_ref = _extract_field([
-            r'(?:epico|épico|epic)\s*[:\-]\s*([^;\n]+)',
-            r'(?:objetivo\s+atual|goal\s+atual)\s*[:\-]\s*([^;\n]+)',
-        ], raw)
+        epic_id = _extract_field([r'(?:id(?:\s+do)?\s+(?:epico|épico|epic)|(?:epico|épico|epic)\s+id|id)\s*[:\-]\s*([0-9a-fA-F\-]{36})'], raw)
+        epic_ref = _extract_field([r'(?:epico|épico|epic)\s*[:\-]\s*([^;\n]+)', r'(?:objetivo\s+atual|goal\s+atual)\s*[:\-]\s*([^;\n]+)'], raw)
         if not epic_id and epic_ref and _normalize_text(epic_ref) in ['editar', 'atualizar', 'alterar']:
             epic_ref = ''
         missing = []
@@ -217,93 +261,29 @@ def _detect_chat_action(message: str) -> dict:
             missing.append('epic_ref')
         if not any([new_goal, new_description, new_priority]):
             missing.append('changes')
-        return {
-            'type': 'update_epic',
-            'epic_id': epic_id,
-            'epic_ref': epic_ref,
-            'goal': new_goal,
-            'description': new_description,
-            'priority': new_priority,
-            'missing': missing,
-        }
+        return {'type': 'update_epic', 'epic_id': epic_id, 'epic_ref': epic_ref, 'goal': new_goal, 'description': new_description, 'priority': new_priority, 'missing': missing}
 
     if any(term in normalized for term in create_terms) and any(term in normalized for term in task_terms):
         priority = _resolve_priority(normalized, default='medium')
-        title = _extract_field([
-            r'(?:tarefa|task)\s*[:\-]\s*(.+)',
-            r'(?:tarefa|task)\s+chamada\s+(.+)',
-            r'(?:tarefa|task)\s+com\s+nome\s+(.+)',
-            r'criar\s+(?:uma\s+)?(?:nova\s+)?(?:tarefa|task)\s+(?:com\s+)?(?:titulo\s+)?(.+)',
-        ], raw)
-        description = _extract_field([
-            r'(?:descricao|descrição|description)\s*[:\-]\s*(.+)',
-            r'(?:detalhes|detalhe|details)\s*[:\-]\s*(.+)',
-        ], raw)
-
+        title = _extract_field([r'(?:tarefa|task)\s*[:\-]\s*(.+)', r'(?:tarefa|task)\s+chamada\s+(.+)', r'criar\s+(?:uma\s+)?(?:nova\s+)?(?:tarefa|task)\s+(?:com\s+)?(?:titulo\s+)?(.+)'], raw)
+        description = _extract_field([r'(?:descricao|descrição|description)\s*[:\-]\s*(.+)'], raw)
         if title:
-            title = re.split(
-                r';\s*(?:prioridade|priority|descricao|descrição|description)\s*:',
-                title,
-                maxsplit=1,
-                flags=re.IGNORECASE,
-            )[0].strip(' .;:')
-
+            title = re.split(r';\s*(?:prioridade|priority|descricao|descrição|description)\s*:', title, maxsplit=1, flags=re.IGNORECASE)[0].strip(' .;:')
         if not title or len(title) < 5:
-            return {
-                'type': 'create_task',
-                'missing': ['title'],
-                'priority': priority,
-            }
-
-        return {
-            'type': 'create_task',
-            'title': title,
-            'description': description,
-            'priority': priority,
-            'status': 'queue',
-        }
+            return {'type': 'create_task', 'missing': ['title'], 'priority': priority}
+        return {'type': 'create_task', 'title': title, 'description': description, 'priority': priority, 'status': 'queue'}
 
     if not any(term in normalized for term in create_terms) or not any(term in normalized for term in epic_terms):
         return {'type': 'none'}
 
     priority = _resolve_priority(normalized, default='medium')
-
-    goal = _extract_field([
-        r'(?:objetivo|goal)\s*[:\-]\s*(.+)',
-        r'(?:epico|épico|epic)\s*[:\-]\s*(.+)',
-        r'(?:epico|épico|epic)\s+chamado\s+(.+)',
-        r'(?:epico|épico|epic)\s+com\s+nome\s+(.+)',
-        r'(?:chamado|nomeado)\s+(.+)',
-        r'criar\s+(?:um\s+)?(?:novo\s+)?(?:epico|épico|epic)\s+(?:com\s+)?(?:objetivo\s+)?(.+)',
-    ], raw)
-
-    description = _extract_field([
-        r'(?:descricao|descrição|description)\s*[:\-]\s*(.+)',
-        r'(?:detalhes|detalhe|details)\s*[:\-]\s*(.+)',
-    ], raw)
-
+    goal = _extract_field([r'(?:objetivo|goal)\s*[:\-]\s*(.+)', r'(?:epico|épico|epic)\s*[:\-]\s*(.+)', r'criar\s+(?:um\s+)?(?:novo\s+)?(?:epico|épico|epic)\s+(?:com\s+)?(?:objetivo\s+)?(.+)'], raw)
+    description = _extract_field([r'(?:descricao|descrição|description)\s*[:\-]\s*(.+)'], raw)
     if goal:
-        # Remove trailing structured fields that may come in the same sentence.
-        goal = re.split(
-            r';\s*(?:prioridade|priority|descricao|descrição|description)\s*:',
-            goal,
-            maxsplit=1,
-            flags=re.IGNORECASE,
-        )[0].strip(' .;:')
-
+        goal = re.split(r';\s*(?:prioridade|priority|descricao|descrição|description)\s*:', goal, maxsplit=1, flags=re.IGNORECASE)[0].strip(' .;:')
     if not goal or len(goal) < 8:
-        return {
-            'type': 'create_epic',
-            'missing': ['goal'],
-            'priority': priority,
-        }
-
-    return {
-        'type': 'create_epic',
-        'goal': goal,
-        'description': description,
-        'priority': priority,
-    }
+        return {'type': 'create_epic', 'missing': ['goal'], 'priority': priority}
+    return {'type': 'create_epic', 'goal': goal, 'description': description, 'priority': priority}
 
 
 def _find_epic_for_action(action: dict):
@@ -653,6 +633,57 @@ class TaskViewSet(viewsets.ModelViewSet):
         logs = ThoughtLog.objects.filter(task=task).order_by('timestamp')
         serializer = ThoughtLogSerializer(logs, many=True)
         return Response(serializer.data)
+
+    @action(detail=True, methods=['post'])
+    def file_change_preview(self, request, pk=None):
+        """Gera diff e valida policy sem alterar arquivos."""
+        task = self.get_object()
+        relative_path = (request.data.get('relative_path') or '').strip()
+        new_content = request.data.get('new_content') or ''
+
+        if not relative_path:
+            return Response({'error': 'relative_path é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
+
+        preview = preview_file_change(str(task.id), relative_path, str(new_content))
+        return Response(preview, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def apply_file_change(self, request, pk=None):
+        """Aplica mudança de arquivo somente com aprovação explícita."""
+        task = self.get_object()
+        relative_path = (request.data.get('relative_path') or '').strip()
+        new_content = request.data.get('new_content') or ''
+        approved = bool(request.data.get('approved', False))
+
+        if not relative_path:
+            return Response({'error': 'relative_path é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
+
+        result = apply_file_change(
+            task_id=str(task.id),
+            relative_path=relative_path,
+            new_content=str(new_content),
+            approved=approved,
+        )
+
+        if task.result is None or not isinstance(task.result, dict):
+            task.result = {}
+        task.result['last_file_change'] = result
+        task.save(update_fields=['result'])
+
+        http_status = status.HTTP_200_OK if result.get('applied') else status.HTTP_400_BAD_REQUEST
+        return Response(result, status=http_status)
+
+    @action(detail=True, methods=['post'])
+    def rollback_file_snapshot(self, request, pk=None):
+        """Restaura o workspace isolado da tarefa para um snapshot específico."""
+        task = self.get_object()
+        snapshot_id = (request.data.get('snapshot_id') or '').strip()
+        if not snapshot_id:
+            return Response({'error': 'snapshot_id é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
+
+        result = rollback_snapshot(str(task.id), snapshot_id)
+        http_status = status.HTTP_200_OK if result.get('rolled_back') else status.HTTP_400_BAD_REQUEST
+        return Response(result, status=http_status)
 
     @action(detail=True, methods=['post'])
     def complete(self, request, pk=None):

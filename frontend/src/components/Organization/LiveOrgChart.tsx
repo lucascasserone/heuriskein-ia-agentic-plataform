@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import ReactFlow, {
   Background,
   Controls,
@@ -9,9 +9,8 @@ import ReactFlow, {
   Node,
   Position,
 } from 'reactflow';
-import { AlertTriangle } from 'lucide-react';
+import { AlertTriangle, Brain, Briefcase, Crown, Sparkles, Wrench } from 'lucide-react';
 import { OrgTaskNode } from '@/lib/api';
-import AgentDetailModal from './AgentDetailModal';
 
 interface LiveOrgChartProps {
   taskTree: Record<string, OrgTaskNode>;
@@ -25,16 +24,24 @@ interface LiveOrgChartProps {
     capabilities: string[];
     level: 'ceo' | 'director' | 'head' | 'analyst';
   }>;
-  chatHistoryByTaskId: Record<string, Array<{ role: 'user' | 'agent'; content: string; timestamp: string }>>;
-  onSendMessage: (task: OrgTaskNode, content: string) => Promise<void>;
+  selectedTaskId?: string | null;
+  onSelectTask?: (taskId: string | null) => void;
+  onOpenFactory?: () => void;
 }
 
 const LEVEL_ORDER: Array<OrgTaskNode['level']> = ['ceo', 'director', 'head', 'analyst'];
-const LEVEL_Y: Record<OrgTaskNode['level'], number> = {
-  ceo: 40,
-  director: 210,
-  head: 380,
-  analyst: 550,
+const LEVEL_X: Record<OrgTaskNode['level'], number> = {
+  ceo: 110,
+  director: 390,
+  head: 670,
+  analyst: 950,
+};
+
+const ROLE_ICON: Record<OrgTaskNode['level'], any> = {
+  ceo: Crown,
+  director: Briefcase,
+  head: Brain,
+  analyst: Wrench,
 };
 
 const STATUS_STYLE: Record<OrgTaskNode['status'], string> = {
@@ -46,17 +53,55 @@ const STATUS_STYLE: Record<OrgTaskNode['status'], string> = {
   done: 'border-secondary/45 bg-secondary/10 text-secondary',
 };
 
-function TaskFlowCard({ task }: { task: OrgTaskNode }) {
+const FLOW_PRO_OPTIONS = { hideAttribution: true };
+const FLOW_DEFAULT_EDGE_OPTIONS = { type: 'smoothstep' as const };
+
+function statusNarrative(task: OrgTaskNode) {
+  if (task.status === 'in_progress') return 'Decompondo missao...';
+  if (task.status === 'awaiting_approval') return 'Aguardando validacao';
+  if (task.status === 'queued') return 'Aguardando fila';
+  if (task.status === 'approved' || task.status === 'done') return 'Fluxo concluido';
+  return 'Replanejar com feedback';
+}
+
+function statusShort(task: OrgTaskNode) {
+  if (task.status === 'in_progress') return 'Pensando...';
+  if (task.status === 'awaiting_approval') return 'Delegando...';
+  if (task.status === 'queued') return 'Na fila';
+  if (task.status === 'approved' || task.status === 'done') return 'Concluido';
+  return 'Revisar';
+}
+
+function TaskFlowCard({
+  task,
+  isSelected,
+  agentName,
+}: {
+  task: OrgTaskNode;
+  isSelected: boolean;
+  agentName: string;
+}) {
+  const isThinking = task.status === 'in_progress' || task.status === 'awaiting_approval';
+  const RoleIcon = ROLE_ICON[task.level];
+  const missionTokens = Math.max(18, task.complexity * 18);
+  const childCount = task.children?.length || 0;
+
   return (
     <div className={[
-      'w-[250px] rounded-xl border p-3 text-left transition-all',
+      'w-[182px] rounded-lg border p-2.5 text-left transition-all backdrop-blur-md',
+      'bg-[#0f172a]/85 shadow-[0_8px_22px_rgba(15,23,42,0.55)]',
       STATUS_STYLE[task.status],
+      isSelected ? 'ring-2 ring-cyan-300/70 shadow-[0_0_16px_rgba(34,211,238,0.45)]' : '',
     ].join(' ')}>
       <div className="flex items-start justify-between gap-2">
-        <div>
-          <p className="text-[10px] uppercase tracking-wider opacity-80">{task.level}</p>
-          <h3 className="text-xs font-semibold text-text-title line-clamp-1">{task.title}</h3>
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-cyan-200/90">
+            <RoleIcon size={11} />
+            <span>{task.level}</span>
+          </div>
+          <h3 className="text-[11px] font-semibold text-text-title line-clamp-1">{agentName || task.title}</h3>
         </div>
+        <span className="rounded border border-cyan-300/40 bg-cyan-500/10 px-1.5 py-0.5 text-[9px] text-cyan-200">{missionTokens} tk</span>
         {task.status === 'rejected' && task.approval_notes ? (
           <span title={task.approval_notes}>
             <AlertTriangle size={14} className="text-red-300" />
@@ -64,10 +109,15 @@ function TaskFlowCard({ task }: { task: OrgTaskNode }) {
         ) : null}
       </div>
 
-      <p className="mt-2 text-[11px] text-gray-light line-clamp-2">{task.objective}</p>
-      <div className="mt-2 flex items-center justify-between text-[10px] text-gray-light">
+      <p className="mt-2 text-[10px] text-gray-light line-clamp-2">{task.objective}</p>
+      <p className="mt-1 text-[10px] text-cyan-100/75 line-clamp-1">{statusNarrative(task)}</p>
+      <div className="mt-2 flex items-center justify-between text-[10px]">
+        <span className="text-gray-light">{statusShort(task)}</span>
+        {isThinking ? <span className="h-2 w-2 rounded-full bg-primary animate-pulse" /> : null}
+      </div>
+      <div className="mt-1.5 flex items-center justify-between text-[9px] text-gray-light">
+        <span>Sub: {childCount}</span>
         <span>C: {task.complexity}</span>
-        <span>{task.status}</span>
       </div>
     </div>
   );
@@ -77,30 +127,10 @@ export default function LiveOrgChart({
   taskTree,
   rootTaskId,
   agentProfiles,
-  chatHistoryByTaskId,
-  onSendMessage,
+  selectedTaskId,
+  onSelectTask,
+  onOpenFactory,
 }: LiveOrgChartProps) {
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-
-  const grouped = useMemo(() => {
-    const byLevel: Record<OrgTaskNode['level'], OrgTaskNode[]> = {
-      ceo: [],
-      director: [],
-      head: [],
-      analyst: [],
-    };
-
-    Object.values(taskTree || {}).forEach((task) => {
-      byLevel[task.level].push(task);
-    });
-
-    LEVEL_ORDER.forEach((level) => {
-      byLevel[level].sort((a, b) => a.title.localeCompare(b.title));
-    });
-
-    return byLevel;
-  }, [taskTree]);
-
   const flowNodes = useMemo<Node[]>(() => {
     const byLevelIndex: Record<OrgTaskNode['level'], number> = {
       ceo: 0,
@@ -111,19 +141,20 @@ export default function LiveOrgChart({
 
     return Object.values(taskTree || {}).map((task) => {
       const index = byLevelIndex[task.level]++;
-      const x = 120 + index * 290;
-      const y = LEVEL_Y[task.level];
+      const x = LEVEL_X[task.level];
+      const y = 120 + index * 158;
+      const agentName = agentProfiles?.[task.agent_id]?.name || task.title;
       return {
         id: task.id,
         data: {
-          label: <TaskFlowCard task={task} />,
+          label: <TaskFlowCard task={task} isSelected={selectedTaskId === task.id} agentName={agentName} />,
         },
-        sourcePosition: Position.Bottom,
-        targetPosition: Position.Top,
+        sourcePosition: Position.Right,
+        targetPosition: Position.Left,
         position: { x, y },
       };
     });
-  }, [taskTree]);
+  }, [taskTree, selectedTaskId, agentProfiles]);
 
   const flowEdges = useMemo<Edge[]>(() => {
     const edges: Edge[] = [];
@@ -147,81 +178,78 @@ export default function LiveOrgChart({
     return edges;
   }, [taskTree]);
 
-  const selectedTask = selectedTaskId ? taskTree[selectedTaskId] || null : null;
-  const selectedChatHistory = selectedTaskId ? (chatHistoryByTaskId[selectedTaskId] || []) : [];
+  const levelStats = useMemo(() => {
+    const counts: Record<OrgTaskNode['level'], number> = {
+      ceo: 0,
+      director: 0,
+      head: 0,
+      analyst: 0,
+    };
+    Object.values(taskTree || {}).forEach((task) => {
+      counts[task.level] += 1;
+    });
+    return counts;
+  }, [taskTree]);
 
   return (
-    <>
-      <div className="rounded-xl border border-gray-metallic/25 bg-surface/30 p-4">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-sm font-semibold text-text-title">Organograma vivo</h2>
-          <p className="text-xs text-gray-light">Root task: {rootTaskId || '-'}</p>
-        </div>
-
-        <div className="h-[640px] rounded-xl border border-primary/15 bg-darker/60 overflow-hidden mb-3">
-          <ReactFlow
-            nodes={flowNodes}
-            edges={flowEdges}
-            fitView
-            proOptions={{ hideAttribution: true }}
-            onNodeClick={(_, node) => setSelectedTaskId(node.id)}
-            defaultEdgeOptions={{ type: 'smoothstep' }}
-          >
-            <Background color="#1f2937" gap={16} size={1} />
-            <Controls showInteractive={false} position="bottom-right" />
-          </ReactFlow>
-        </div>
-
-        <div className="grid grid-cols-1 xl:grid-cols-4 gap-3">
-          {LEVEL_ORDER.map((level) => (
-            <section key={level} className="rounded-lg border border-gray-metallic/25 bg-dark/45 p-3">
-              <header className="mb-3 flex items-center justify-between">
-                <h3 className="text-xs uppercase tracking-wider text-gray-light">{level}</h3>
-                <span className="text-[11px] text-primary">{grouped[level].length}</span>
-              </header>
-
-              <div className="space-y-2">
-                {grouped[level].length === 0 ? (
-                  Object.values(agentProfiles || {}).filter((item) => item.level === level).length > 0 ? (
-                    Object.values(agentProfiles || {})
-                      .filter((item) => item.level === level)
-                      .map((agent) => (
-                        <div key={agent.id} className="rounded-md border border-gray-metallic/20 bg-surface/30 p-2 text-[11px]">
-                          <p className="text-text-title font-semibold">{agent.name}</p>
-                          <p className="text-gray-light">Status: {agent.state}</p>
-                          <p className="text-gray-light/80 line-clamp-1">{agent.model || 'model n/a'}</p>
-                        </div>
-                      ))
-                  ) : (
-                    <div className="rounded-md border border-gray-metallic/20 bg-surface/30 p-2 text-[11px] text-gray-light">
-                      Sem tarefas neste nivel.
-                    </div>
-                  )
-                ) : (
-                  grouped[level].map((task) => (
-                    <button
-                      key={task.id}
-                      onClick={() => setSelectedTaskId(task.id)}
-                      className="w-full rounded-md border border-gray-metallic/20 bg-surface/30 p-2 text-left text-[11px] hover:border-primary/35"
-                    >
-                      <p className="text-text-title font-semibold line-clamp-1">{task.title}</p>
-                      <p className="text-gray-light">{task.status}</p>
-                    </button>
-                  ))
-                )}
-              </div>
-            </section>
-          ))}
-        </div>
+    <div className="rounded-xl border border-gray-metallic/25 bg-surface/30 p-3 h-[72vh] min-h-[620px]">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-sm font-semibold text-text-title">Organograma vivo</h2>
+        <p className="text-xs text-gray-light">Root: {rootTaskId || '-'} · Agentes: {Object.keys(agentProfiles || {}).length}</p>
       </div>
 
-      <AgentDetailModal
-        open={Boolean(selectedTask)}
-        onClose={() => setSelectedTaskId(null)}
-        task={selectedTask}
-        chatHistory={selectedChatHistory}
-        onSendMessage={onSendMessage}
-      />
-    </>
+      <div className="h-[calc(72vh-64px)] min-h-[550px] rounded-xl border border-primary/15 bg-darker/60 overflow-hidden relative">
+        <div className="pointer-events-none absolute inset-0 z-[1] grid grid-cols-4">
+          {LEVEL_ORDER.map((level, idx) => (
+            <div
+              key={`lane-${level}`}
+              className={[
+                'h-full border-r border-dashed border-cyan-300/20',
+                idx % 2 === 0 ? 'bg-gradient-to-b from-cyan-500/6 to-transparent' : 'bg-gradient-to-b from-blue-500/5 to-transparent',
+                idx === LEVEL_ORDER.length - 1 ? 'border-r-0' : '',
+              ].join(' ')}
+            />
+          ))}
+        </div>
+
+        <div className="pointer-events-none absolute inset-x-3 top-2 z-10 grid grid-cols-4 gap-2 text-[11px]">
+          {LEVEL_ORDER.map((level) => {
+            const Icon = ROLE_ICON[level];
+            return (
+              <div key={level} className="rounded border border-cyan-300/25 bg-[#0f172a]/70 px-2 py-1.5 text-cyan-100 uppercase tracking-wider flex items-center justify-between">
+                <span className="inline-flex items-center gap-1.5">
+                  <Icon size={12} />
+                  {level}
+                </span>
+                <span className="text-primary">{levelStats[level]}</span>
+              </div>
+            );
+          })}
+        </div>
+
+        <ReactFlow
+          nodes={flowNodes}
+          edges={flowEdges}
+          fitView
+          proOptions={FLOW_PRO_OPTIONS}
+          onPaneClick={() => onSelectTask?.(null)}
+          onNodeClick={(_, node) => onSelectTask?.(node.id)}
+          defaultEdgeOptions={FLOW_DEFAULT_EDGE_OPTIONS}
+        >
+          <Background color="#1f2937" gap={16} size={1} />
+          <Controls showInteractive={false} position="bottom-right" />
+        </ReactFlow>
+
+        {onOpenFactory ? (
+          <button
+            onClick={onOpenFactory}
+            className="absolute bottom-4 right-4 z-20 inline-flex items-center gap-1.5 rounded-full border border-cyan-300/45 bg-[#0f172a]/85 px-3 py-2 text-xs text-cyan-200 shadow-[0_0_16px_rgba(34,211,238,0.28)] hover:bg-[#0f172a]"
+          >
+            <Sparkles size={13} />
+            Contratar
+          </button>
+        ) : null}
+      </div>
+    </div>
   );
 }

@@ -8,17 +8,8 @@ from typing import AsyncGenerator, Generator, Optional
 from abc import ABC, abstractmethod
 from django.conf import settings
 
-try:
-    from anthropic import Anthropic, AsyncAnthropic
-    HAS_ANTHROPIC = True
-except ImportError:
-    HAS_ANTHROPIC = False
-
-try:
-    from openai import OpenAI, AsyncOpenAI
-    HAS_OPENAI = True
-except ImportError:
-    HAS_OPENAI = False
+HAS_ANTHROPIC = None
+HAS_OPENAI = None
 
 
 class LLMProvider(ABC):
@@ -39,8 +30,15 @@ class ClaudeProvider(LLMProvider):
     """Anthropic Claude provider"""
     
     def __init__(self):
-        if not HAS_ANTHROPIC:
-            raise ImportError("anthropic package not installed")
+        global HAS_ANTHROPIC
+
+        try:
+            # Lazy import to avoid hard failure during Django startup in local dev.
+            from anthropic import Anthropic  # type: ignore
+            HAS_ANTHROPIC = True
+        except Exception as e:
+            HAS_ANTHROPIC = False
+            raise ImportError(f"anthropic package unavailable: {e}")
         
         api_key = getattr(settings, 'ANTHROPIC_API_KEY', '') or os.environ.get('ANTHROPIC_API_KEY', '')
         if not api_key:
@@ -129,8 +127,15 @@ class OpenAIProvider(LLMProvider):
     """OpenAI GPT provider"""
     
     def __init__(self):
-        if not HAS_OPENAI:
-            raise ImportError("openai package not installed")
+        global HAS_OPENAI
+
+        try:
+            # Lazy import to avoid hard failure during Django startup in local dev.
+            from openai import OpenAI  # type: ignore
+            HAS_OPENAI = True
+        except Exception as e:
+            HAS_OPENAI = False
+            raise ImportError(f"openai package unavailable: {e}")
         
         api_key = getattr(settings, 'OPENAI_API_KEY', '') or os.environ.get('OPENAI_API_KEY', '')
         if not api_key:
@@ -236,6 +241,90 @@ Prioridade: {epic.get('priority', 'N/A')}
 Por favor, forneça análise de viabilidade, riscos e oportunidades.
         """
         return prompt
+
+    def decompose_epic(self, goal: str, description: str, priority: str) -> list:
+        """Use LLM to decompose an epic into 3-6 actionable tasks.
+        Returns a list of task dicts with keys: title, description, priority, status.
+        Raises on any LLM error so callers can fall back.
+        """
+        prompt = f"""Você é um gerente de produto especializado em decompor épicos em tarefas acionáveis.
+
+Épico:
+- Objetivo: {goal}
+- Descrição: {description or 'Sem descrição adicional.'}
+- Prioridade: {priority}
+
+Decomponha este épico em 3 a 6 tarefas concretas e acionáveis que juntas entreguem o épico completo.
+Para cada tarefa, use o formato EXATO abaixo (uma por bloco, sem texto fora do formato):
+
+TAREFA:
+titulo: <título em até 90 caracteres>
+descricao: <descrição detalhada do que deve ser feito>
+prioridade: <low|medium|high>"""
+
+        response = self.chat(
+            messages=[{"role": "user", "content": prompt}],
+            system="Você é um assistente especializado em gestão de projetos ágeis. Responda em português do Brasil.",
+        )
+        tasks = _parse_task_blocks(response)
+        if not tasks:
+            raise ValueError("LLM returned no valid task blocks")
+        return tasks
+
+    def decompose_task(self, title: str, description: str, epic_goal: str = "") -> list:
+        """Use LLM to break a complex task into 2-4 subtasks.
+        Returns a list of task dicts. Raises on error.
+        """
+        context = f"\nContexto do épico: {epic_goal}" if epic_goal else ""
+        prompt = f"""Você é um agente de engenharia decompondo tarefas complexas.
+
+Tarefa complexa:
+- Título: {title}
+- Descrição: {description or 'Sem descrição adicional.'}{context}
+
+Esta tarefa precisa ser quebrada em 2 a 4 subtarefas menores e independentes.
+Use o formato EXATO (sem texto fora do formato):
+
+TAREFA:
+titulo: <título em até 90 caracteres>
+descricao: <o que deve ser feito especificamente>
+prioridade: <low|medium|high>"""
+
+        response = self.chat(
+            messages=[{"role": "user", "content": prompt}],
+            system="Você é um assistente especializado em decomposição de tarefas técnicas. Responda em português do Brasil.",
+        )
+        tasks = _parse_task_blocks(response)
+        if not tasks:
+            raise ValueError("LLM returned no valid task blocks")
+        return tasks
+
+
+def _parse_task_blocks(text: str) -> list:
+    """Parse TAREFA: blocks from an LLM response into task dicts."""
+    import re
+    tasks = []
+    blocks = re.split(r'\bTAREFA\s*:', text, flags=re.IGNORECASE)
+    for block in blocks[1:]:
+        entry: dict = {}
+        for line in block.strip().splitlines():
+            line = line.strip()
+            low = line.lower()
+            if low.startswith('titulo:'):
+                entry['title'] = line.split(':', 1)[1].strip()[:255]
+            elif low.startswith('descricao:') or low.startswith('descrição:'):
+                entry['description'] = line.split(':', 1)[1].strip()
+            elif low.startswith('prioridade:'):
+                raw_p = line.split(':', 1)[1].strip().lower()
+                entry['priority'] = raw_p if raw_p in ('low', 'medium', 'high') else 'medium'
+        if entry.get('title'):
+            tasks.append({
+                'title': entry['title'],
+                'description': entry.get('description', ''),
+                'priority': entry.get('priority', 'medium'),
+                'status': 'queue',
+            })
+    return tasks
 
 
 # Singleton instance

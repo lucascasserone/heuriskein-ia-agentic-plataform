@@ -5,9 +5,11 @@ Designed to run in a background thread (non-blocking).
 """
 
 import threading
+import re
 from django.utils import timezone
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
+from api.file_sandbox import SandboxPolicy, create_snapshot, preview_file_change, task_workspace
 
 
 # ──────────────────────────────────────────────────────────────
@@ -54,6 +56,9 @@ Use explicitamente esse esclarecimento para orientar a execução.
     except Exception:
         clarification_ctx = ""
 
+    workspace = task_workspace(str(task.id))
+    policy = SandboxPolicy()
+
     return f"""# Tarefa para Execução
 
 **Título:** {task.title}
@@ -64,7 +69,22 @@ Use explicitamente esse esclarecimento para orientar a execução.
 {clarification_ctx}
 
 ## Instruções
-Execute esta tarefa completamente. Estruture sua resposta como:
+Execute esta tarefa completamente. Estruture sua resposta com as seções abaixo.
+
+## Sandbox de Arquivos (Semana 1)
+- Workspace isolado da tarefa: {workspace}
+- Somente caminhos relativos (sem '..' e sem caminho absoluto)
+- Extensões permitidas: {', '.join(policy.allowed_extensions)}
+- Extensões bloqueadas: {', '.join(policy.blocked_extensions)}
+- Tamanho máximo por arquivo: {policy.max_file_bytes} bytes
+
+Se você precisar propor criação/edição de arquivos, use EXATAMENTE este formato:
+[FILE_CHANGE: caminho/relativo.ext]
+```content
+<conteúdo completo final do arquivo>
+```
+[/FILE_CHANGE]
+Não aplique alterações destrutivas fora do sandbox.
 
 ### Análise
 [Sua análise do que precisa ser feito]
@@ -77,6 +97,12 @@ Execute esta tarefa completamente. Estruture sua resposta como:
 
 ### Próximos Passos
 [O que deve ser feito a seguir, se aplicável]
+
+### Subtarefas Geradas
+Se esta tarefa revelou trabalhos adicionais que precisam ser criados como tarefas independentes,
+liste-os usando EXATAMENTE o formato abaixo (uma por linha, sem texto extra):
+[SUBTAREFA: <título> || <descrição> || <low|medium|high>]
+Se não houver subtarefas novas, omita esta seção.
 """
 
 
@@ -178,6 +204,9 @@ def _run_task(task_id: str):
 
     _log(agent, task, f"🧠 Analisando tarefa: {task.title}")
 
+    snapshot_info = create_snapshot(str(task.id))
+    _log(agent, task, f"🧷 Snapshot criado: {snapshot_info.get('snapshot_id')}")
+
     try:
         llm = get_llm_service()
     except Exception as e:
@@ -209,6 +238,11 @@ def _run_task(task_id: str):
 
     # ── Parse sections from response ────────────────────────
     result = _parse_response(response_text)
+    file_change_plan = _extract_file_change_plan(str(task.id), response_text)
+    if file_change_plan:
+        result['file_change_plan'] = file_change_plan
+        result['requires_approval'] = True
+        _log(agent, task, f"📝 {len(file_change_plan)} mudança(s) de arquivo proposta(s) com diff.")
 
     # ── Save result & mark completed ────────────────────────
     task.status = "completed"
@@ -225,6 +259,11 @@ def _run_task(task_id: str):
         _broadcast_agent(agent)
 
     _log(agent, task, "✅ Tarefa concluída com sucesso.")
+
+    # ── Auto-create subtasks from LLM output ────────────────
+    subtask_count = _create_subtasks_from_result(task, response_text)
+    if subtask_count:
+        _log(agent, task, f"📋 {subtask_count} subtarefa(s) gerada(s) automaticamente.")
 
 
 def _fail_task(task, agent, error_msg: str):
@@ -243,6 +282,36 @@ def _fail_task(task, agent, error_msg: str):
         _broadcast_agent(agent)
 
     _log(agent, task, f"❌ Falha na execução: {error_msg}", level="error")
+
+
+def _create_subtasks_from_result(task, raw_text: str) -> int:
+    """Parse [SUBTAREFA: title || description || priority] markers and create Task objects."""
+    import re as _re
+    from api.models import Task as TaskModel
+
+    pattern = _re.compile(
+        r'\[SUBTAREFA:\s*(.+?)\s*\|\|\s*(.+?)\s*\|\|\s*(low|medium|high)\s*\]',
+        _re.IGNORECASE | _re.DOTALL,
+    )
+    created = 0
+    for match in pattern.finditer(raw_text):
+        title = match.group(1).strip()[:255]
+        description = match.group(2).strip()
+        priority = match.group(3).strip().lower()
+        if not title:
+            continue
+        try:
+            TaskModel.objects.create(
+                title=title,
+                description=description,
+                priority=priority,
+                status='queue',
+                epic=task.epic if hasattr(task, 'epic') else None,
+            )
+            created += 1
+        except Exception:
+            pass
+    return created
 
 
 def _parse_response(text: str) -> dict:
@@ -291,6 +360,27 @@ def _parse_response(text: str) -> dict:
         sections["resultado"] = text.strip()
 
     return sections
+
+
+def _extract_file_change_plan(task_id: str, text: str) -> list[dict]:
+    """Parse FILE_CHANGE blocks and build non-destructive diff previews."""
+    pattern = re.compile(
+        r'\[FILE_CHANGE:\s*(.+?)\]\s*```(?:content)?\n(.*?)```\s*\[/FILE_CHANGE\]',
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    plan: list[dict] = []
+    for match in pattern.finditer(text):
+        relative_path = match.group(1).strip()
+        new_content = match.group(2)
+        preview = preview_file_change(
+            task_id=task_id,
+            relative_path=relative_path,
+            new_content=new_content,
+        )
+        plan.append(preview)
+
+    return plan
 
 
 # ──────────────────────────────────────────────────────────────

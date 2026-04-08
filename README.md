@@ -53,6 +53,10 @@ python manage.py runserver 0.0.0.0:8001
 cd frontend
 npm install
 npm run dev
+
+# Se veio .env.local da Vercel, ajuste para ambiente local:
+# NEXT_PUBLIC_API_URL=http://127.0.0.1:8001/api/v1
+# NEXT_PUBLIC_WS_URL=ws://127.0.0.1:8001/ws
 ```
 
 **Acesse:**

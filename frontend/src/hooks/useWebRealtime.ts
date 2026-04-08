@@ -1,4 +1,15 @@
-import { useEffect, useRef, useCallback, useState } from 'react';
+import { useEffect, useRef, useCallback, useState, useMemo } from 'react';
+
+function resolveWsBaseUrl() {
+  if (typeof window !== 'undefined') {
+    const hostname = window.location.hostname;
+    if (hostname === 'localhost' || hostname === '127.0.0.1') {
+      return `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${hostname}:8001/ws`;
+    }
+  }
+
+  return process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8001/ws';
+}
 
 interface WebSocketMessage {
   type: string;
@@ -26,7 +37,9 @@ export function useWebRealtime(
   const wsRef = useRef<WebSocket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const handlersRef = useRef<Map<string, Set<MessageHandler>>>(new Map());
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const shouldReconnectRef = useRef(true);
+  const reconnectAttemptsRef = useRef(0);
   const {
     url,
     onConnect,
@@ -37,7 +50,14 @@ export function useWebRealtime(
   } = options;
 
   const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
+    if (!shouldReconnectRef.current) {
+      return;
+    }
+
+    if (
+      wsRef.current?.readyState === WebSocket.OPEN ||
+      wsRef.current?.readyState === WebSocket.CONNECTING
+    ) {
       return;
     }
 
@@ -46,6 +66,7 @@ export function useWebRealtime(
 
       ws.onopen = () => {
         setIsConnected(true);
+        reconnectAttemptsRef.current = 0;
         onConnect?.();
         console.log(`✅ Connected to ${url}`);
       };
@@ -84,19 +105,31 @@ export function useWebRealtime(
       };
 
       ws.onerror = (error) => {
+        if (!shouldReconnectRef.current) {
+          return;
+        }
         console.error('WebSocket error:', error);
         onError?.(`WebSocket error at ${url}`);
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
+        wsRef.current = null;
         setIsConnected(false);
         onDisconnect?.();
-        console.log(`❌ Disconnected from ${url}`);
+        if (shouldReconnectRef.current) {
+          console.log(`❌ Disconnected from ${url}`);
+        }
 
         // Auto-reconnect
-        if (autoReconnect) {
-          const interval = reconnectInterval;
+        const intentionalClose = event.code === 1000;
+        if (autoReconnect && shouldReconnectRef.current && !intentionalClose) {
+          const nextAttempt = reconnectAttemptsRef.current + 1;
+          reconnectAttemptsRef.current = nextAttempt;
+          const interval = Math.min(reconnectInterval * nextAttempt, 30000);
           reconnectTimeoutRef.current = setTimeout(() => {
+            if (!shouldReconnectRef.current) {
+              return;
+            }
             console.log('🔄 Attempting to reconnect...');
             connect();
           }, interval);
@@ -143,33 +176,38 @@ export function useWebRealtime(
   );
 
   useEffect(() => {
+    shouldReconnectRef.current = true;
     connect();
 
     return () => {
+      shouldReconnectRef.current = false;
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
       }
       if (wsRef.current) {
-        wsRef.current.close();
+        wsRef.current.close(1000, 'Component unmount');
+        wsRef.current = null;
       }
       handlersRef.current.clear();
     };
   }, [connect]);
 
-  return {
-    isConnected,
-    send,
-    subscribe,
-  };
+  return useMemo(
+    () => ({
+      isConnected,
+      send,
+      subscribe,
+    }),
+    [isConnected, send, subscribe]
+  );
 }
 
 /**
  * Hook for real-time task updates
  */
 export function useTaskRealtime() {
-  const wsBase =
-    process.env.NEXT_PUBLIC_WS_URL ||
-    `${typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws'}://127.0.0.1:8001/ws`;
+  const wsBase = resolveWsBaseUrl();
   const wsUrl = `${wsBase.replace(/\/$/, '')}/tasks/`;
 
   return useWebRealtime({
@@ -182,9 +220,7 @@ export function useTaskRealtime() {
  * Hook for real-time agent updates
  */
 export function useAgentRealtime() {
-  const wsBase =
-    process.env.NEXT_PUBLIC_WS_URL ||
-    `${typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws'}://127.0.0.1:8001/ws`;
+  const wsBase = resolveWsBaseUrl();
   const wsUrl = `${wsBase.replace(/\/$/, '')}/agents/`;
 
   return useWebRealtime({
@@ -197,9 +233,7 @@ export function useAgentRealtime() {
  * Hook for real-time epic updates
  */
 export function useEpicRealtime() {
-  const wsBase =
-    process.env.NEXT_PUBLIC_WS_URL ||
-    `${typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws'}://127.0.0.1:8001/ws`;
+  const wsBase = resolveWsBaseUrl();
   const wsUrl = `${wsBase.replace(/\/$/, '')}/epics/`;
 
   return useWebRealtime({
@@ -212,9 +246,7 @@ export function useEpicRealtime() {
  * Hook for real-time thought logs
  */
 export function useThoughtLogsRealtime() {
-  const wsBase =
-    process.env.NEXT_PUBLIC_WS_URL ||
-    `${typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws'}://127.0.0.1:8001/ws`;
+  const wsBase = resolveWsBaseUrl();
   const wsUrl = `${wsBase.replace(/\/$/, '')}/logs/`;
 
   return useWebRealtime({

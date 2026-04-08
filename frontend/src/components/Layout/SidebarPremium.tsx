@@ -86,7 +86,7 @@ export default function Sidebar({ collapsed = false, onToggleCollapse }: Sidebar
     return () => {
       unsub();
     };
-  }, [agentRealtime]);
+  }, [agentRealtime.subscribe]);
 
   return (
     <>

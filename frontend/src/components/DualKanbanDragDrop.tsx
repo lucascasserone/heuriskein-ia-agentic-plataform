@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Reorder, motion, AnimatePresence } from 'framer-motion';
 import { useAppStore } from '@/store/appStore';
 import { apiClient, MetricsOverview } from '@/lib/api';
@@ -104,6 +104,7 @@ export default function DualKanbanDragDrop() {
   const [viewingTask, setViewingTask] = useState<Task | null>(null);
   const [clarifyingTask, setClarifyingTask] = useState<Task | null>(null);
   const [metrics, setMetrics] = useState<MetricsOverview | null>(null);
+  const lastFetchErrorRef = useRef<string | null>(null);
   const taskRealtime = useTaskRealtime();
 
   useEffect(() => {
@@ -153,7 +154,7 @@ export default function DualKanbanDragDrop() {
     return () => {
       unsubTask();
     };
-  }, [taskRealtime]);
+  }, [taskRealtime.subscribe]);
 
   useEffect(() => {
     const refreshHandler = () => {
@@ -196,18 +197,49 @@ export default function DualKanbanDragDrop() {
   };
 
   const fetchData = async () => {
-    try {
-      const [epicsRes, tasksRes, metricsRes] = await Promise.all([
-        withTimeout(apiClient.getEpicsByStatus(), 8000),
-        withTimeout(apiClient.getTasksByStatus(), 8000),
-        withTimeout(apiClient.getMetricsOverview(), 8000),
-      ]);
-      setEpics(epicsRes.data || {});
-      setTasks(tasksRes.data || {});
-      setMetrics(metricsRes.data || null);
-    } catch (error) {
-      console.error('Error fetching data:', error);
-      notify.error('Erro ao carregar dados');
+    const [epicsRes, tasksRes, metricsRes] = await Promise.allSettled([
+      withTimeout(apiClient.getEpicsByStatus(), 15000),
+      withTimeout(apiClient.getTasksByStatus(), 15000),
+      withTimeout(apiClient.getMetricsOverview(), 15000),
+    ]);
+
+    let hasAnySuccess = false;
+    const errors: string[] = [];
+
+    if (epicsRes.status === 'fulfilled') {
+      setEpics(epicsRes.value.data || {});
+      hasAnySuccess = true;
+    } else {
+      errors.push('epicos');
+    }
+
+    if (tasksRes.status === 'fulfilled') {
+      setTasks(tasksRes.value.data || {});
+      hasAnySuccess = true;
+    } else {
+      errors.push('tarefas');
+    }
+
+    if (metricsRes.status === 'fulfilled') {
+      setMetrics(metricsRes.value.data || null);
+      hasAnySuccess = true;
+    } else {
+      errors.push('metricas');
+    }
+
+    if (errors.length > 0) {
+      const signature = errors.join(',');
+      if (lastFetchErrorRef.current !== signature) {
+        console.error('Error fetching data from:', errors);
+        notify.error(`Dados indisponiveis: ${errors.join(', ')}`);
+        lastFetchErrorRef.current = signature;
+      }
+    } else {
+      lastFetchErrorRef.current = null;
+    }
+
+    if (!hasAnySuccess) {
+      console.warn('No data sources available for kanban refresh');
     }
   };
 
