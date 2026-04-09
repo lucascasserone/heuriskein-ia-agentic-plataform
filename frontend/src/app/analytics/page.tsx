@@ -5,7 +5,17 @@ import LayoutPremium from '@/components/Layout/LayoutPremium';
 import { apiClient, MetricsOverview, MetricsTimeseriesPoint } from '@/lib/api';
 
 interface StatusCollection {
-  [key: string]: any[];
+  [key: string]: unknown[];
+}
+
+function normalizeStatusCollection(data: unknown): StatusCollection {
+  if (!data || typeof data !== 'object') return {};
+
+  const entries = Object.entries(data as Record<string, unknown>);
+  return entries.reduce<StatusCollection>((acc, [key, value]) => {
+    acc[key] = Array.isArray(value) ? value : [];
+    return acc;
+  }, {});
 }
 
 function RatioBar({ label, value }: { label: string; value: number }) {
@@ -39,7 +49,7 @@ export default function AnalyticsPage() {
           apiClient.getTasksByStatus(),
         ]);
         setMetrics(metricsRes.data || null);
-        setTasks(tasksRes.data || {});
+        setTasks(normalizeStatusCollection(tasksRes.data));
 
         try {
           const seriesRes = await apiClient.getMetricsTimeseries(seriesDays);

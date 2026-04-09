@@ -9,7 +9,17 @@ import { enhancedApiClient } from '@/lib/enhanced-api';
 import { withRetry } from '@/lib/api-utils';
 
 interface StatusMap {
-  [key: string]: number;
+  [key: string]: unknown[];
+}
+
+function normalizeStatusMap(data: unknown): StatusMap {
+  if (!data || typeof data !== 'object') return {};
+
+  const entries = Object.entries(data as Record<string, unknown>);
+  return entries.reduce<StatusMap>((acc, [key, value]) => {
+    acc[key] = Array.isArray(value) ? value : [];
+    return acc;
+  }, {});
 }
 
 export default function DashboardPage() {
@@ -34,10 +44,15 @@ export default function DashboardPage() {
       ]);
 
       setMetrics(metricsRes.data || null);
-      setTaskByStatus(tasksRes.data || {});
-      setEpicByStatus(epicsRes.data || {});
+      setTaskByStatus(normalizeStatusMap(tasksRes.data));
+      setEpicByStatus(normalizeStatusMap(epicsRes.data));
 
-      const list = agentsRes.data?.results || agentsRes.data || [];
+      const agentsPayload = agentsRes.data as { results?: unknown } | unknown[] | null | undefined;
+      const list = Array.isArray(agentsPayload)
+        ? agentsPayload
+        : agentsPayload && typeof agentsPayload === 'object' && 'results' in agentsPayload
+          ? (agentsPayload.results as unknown[])
+          : [];
       setActiveAgents(Array.isArray(list) ? list.length : 0);
       setHealthUp(true);
       setLastUpdated(new Date());

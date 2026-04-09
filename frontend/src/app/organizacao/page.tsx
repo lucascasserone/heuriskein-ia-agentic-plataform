@@ -97,7 +97,7 @@ export default function OrganizacaoAutonomaPage() {
     if (!selectedTask) return null;
 
     const immediateParent = selectedTask.parent_id ? state.task_tree[selectedTask.parent_id] : null;
-    let headSupervisor: OrgTaskNode | null = null;
+    let headSupervisor = null as typeof immediateParent;
     let cursor = immediateParent;
 
     while (cursor) {
