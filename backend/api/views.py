@@ -7,24 +7,26 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth.models import User
 from django.contrib.auth import authenticate
 from django.utils import timezone
-from django.db.models import Q
+from django.db.models import Q, Count
 from datetime import timedelta
 import re
 import unicodedata
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 
-from api.models import Agent, Task, Epic, ThoughtLog, ChatMessage, ClarificationRequest
+from api.models import Agent, Task, Epic, ThoughtLog, ChatMessage, ClarificationRequest, Artifact, Subtask, ApprovalRequest, DecisionRecord
 from api.serializers import (
     AgentSerializer, TaskSerializer, EpicSerializer,
     ThoughtLogSerializer, ChatMessageSerializer,
     RegisterSerializer, LoginSerializer, UserSerializer,
-    ChatRequestSerializer, ChatResponseSerializer, ClarificationRequestSerializer
+    ChatRequestSerializer, ChatResponseSerializer, ClarificationRequestSerializer,
+    TaskDetailSerializer, SubtaskSerializer, ApprovalRequestSerializer, DecisionRecordSerializer
 )
 from api.epic_decomposition import ensure_epic_task_queue
 from api.llm_service import get_llm_service
 from api.execution_engine import execute_task_async
 from api.file_sandbox import preview_file_change, apply_file_change, rollback_snapshot
+from api.work_tracking import create_artifact, record_task_event
 
 
 def _broadcast(group: str, event_type: str, payload: dict):
@@ -90,6 +92,20 @@ def _start_task_processing(task: Task) -> Task:
         task=task,
         message=f"🚀 Iniciando execução: {task.title}",
         level='info'
+    )
+    record_task_event(
+        task,
+        'assigned',
+        f'Tarefa atribuída para {agent.name}',
+        agent=agent,
+        metadata={'status': task.status, 'attempt_count': task.attempt_count},
+    )
+    record_task_event(
+        task,
+        'started',
+        'Execução da tarefa iniciada',
+        agent=agent,
+        metadata={'started_at': task.started_at.isoformat() if task.started_at else ''},
     )
 
     execute_task_async(str(task.pk))
@@ -159,10 +175,19 @@ def _resolve_priority(text: str, default: str = 'medium') -> str:
 
 def _detect_chat_action(message: str) -> dict:
     raw = (message or '').strip()
+    llm_action = {'type': 'none'}
     try:
-        return _detect_chat_action_llm(raw)
+        llm_action = _detect_chat_action_llm(raw)
     except Exception:
-        return _detect_chat_action_regex(raw)
+        llm_action = {'type': 'none'}
+
+    # If the LLM cannot classify an operation, use deterministic regex fallback.
+    if isinstance(llm_action, dict) and llm_action.get('type') not in ('none', '', None):
+        return llm_action
+    regex_action = _detect_chat_action_regex(raw)
+    if isinstance(regex_action, dict) and regex_action.get('type') not in ('none', '', None):
+        return regex_action
+    return llm_action if isinstance(llm_action, dict) else {'type': 'none'}
 
 
 def _detect_chat_action_llm(raw: str) -> dict:
@@ -180,6 +205,7 @@ Regras de classificação:
 - Se o usuário quer CRIAR uma tarefa → type="create_task", inclua: title (string), description (string ou null), priority ("low"|"medium"|"high"), status="queue"
 - Se o usuário quer ATUALIZAR STATUS de um épico → type="update_epic_status", inclua: status ("backlog"|"refinement"|"approved"|"completed"|"failed"), epic_ref (texto do objetivo), epic_id (UUID se mencionado)
 - Se o usuário quer EDITAR/ATUALIZAR dados de um épico → type="update_epic", inclua: epic_ref, epic_id, goal, description, priority (apenas os campos mencionados)
+- Se o usuário quer REVISAR/LISTAR épicos em refinamento → type="review_refinement_epics"
 - Se não for nenhuma das ações acima → type="none"
 
 Se algum campo obrigatório não foi mencionado pelo usuário, adicione "missing": ["campo1", ...].
@@ -217,6 +243,11 @@ def _detect_chat_action_regex(raw: str) -> dict:
     create_terms = ['criar', 'crie', 'adicione', 'adicionar', 'novo', 'nova']
     epic_terms = ['epico', 'epic']
     task_terms = ['tarefa', 'task']
+
+    review_terms = ['revisar', 'revise', 'analisar', 'analisar', 'listar', 'mostra', 'mostrar', 'auditar', 'review']
+    refinement_terms = ['refinamento', 'refinement']
+    if any(term in normalized for term in review_terms) and any(term in normalized for term in epic_terms) and any(term in normalized for term in refinement_terms):
+        return {'type': 'review_refinement_epics'}
 
     if any(term in normalized for term in ['status', 'situacao', 'situação']) and any(term in normalized for term in epic_terms):
         if any(term in normalized for term in ['alterar', 'mudar', 'atualizar', 'trocar', 'definir']):
@@ -335,6 +366,43 @@ def _is_rejection_message(message: str) -> bool:
     return any(term in normalized for term in negative)
 
 
+def _build_refinement_review_message() -> tuple[str, int]:
+    """Return a deterministic review for epics currently in refinement."""
+    epics = Epic.objects.filter(status='refinement').order_by('-updated_at')
+    total = epics.count()
+    if total == 0:
+        return (
+            'Nenhum épico em refinamento no Kanban neste momento. '
+            'Se quiser, posso ajudar a mover um épico de backlog para refinamento.',
+            0,
+        )
+
+    lines = [f'Encontrei {total} épico(s) em refinamento:']
+    for index, epic in enumerate(epics[:8], start=1):
+        tasks = epic.tasks.count()
+        goal = (epic.goal or '').strip()
+        compact_goal = goal[:110] + ('...' if len(goal) > 110 else '')
+        signals = []
+        if not (epic.description or '').strip():
+            signals.append('sem descrição estratégica')
+        if tasks == 0:
+            signals.append('sem tarefas de execução')
+        if epic.priority == 'high' and tasks < 2:
+            signals.append('alta prioridade com baixa decomposição')
+
+        signal_text = f" | atenção: {', '.join(signals)}" if signals else ''
+        lines.append(
+            f"{index}. [{epic.priority}] {compact_goal} (id: {epic.id}, tasks: {tasks}){signal_text}"
+        )
+
+    if total > 8:
+        lines.append(f'... e mais {total - 8} épico(s).')
+
+    lines.append('')
+    lines.append('Próximo passo sugerido: use "aprovar épico id: <id>" para iniciar decomposição automática em tarefas, ou "editar épico id: <id>" para melhorar o escopo.')
+    return ('\n'.join(lines), total)
+
+
 def _should_request_creation_confirmation(message: str, action: dict) -> bool:
     if action.get('type') != 'create_epic' or action.get('missing'):
         return False
@@ -446,6 +514,48 @@ class AgentViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(agents, many=True)
         return Response(serializer.data)
 
+    @action(detail=False, methods=['get'])
+    def capacity(self, request):
+        """Resumo de capacidade e carga operacional por agente."""
+        agents = Agent.objects.all().annotate(
+            queue_count=Count('tasks', filter=Q(tasks__status='queue')),
+            processing_count=Count('tasks', filter=Q(tasks__status='processing')),
+            blocked_count=Count('tasks', filter=Q(tasks__status='blocked')),
+            review_count=Count('tasks', filter=Q(tasks__status='review')),
+            completed_count=Count('tasks', filter=Q(tasks__status='completed')),
+            failed_count=Count('tasks', filter=Q(tasks__status='failed')),
+        )
+
+        payload = []
+        for agent in agents:
+            active_load = agent.processing_count + agent.blocked_count + agent.review_count
+            queued_load = agent.queue_count
+            total_open = active_load + queued_load
+
+            payload.append({
+                'id': str(agent.id),
+                'name': agent.name,
+                'type': agent.type,
+                'state': agent.state,
+                'current_task_id': str(agent.current_task_id) if agent.current_task_id else None,
+                'counts': {
+                    'queue': agent.queue_count,
+                    'processing': agent.processing_count,
+                    'blocked': agent.blocked_count,
+                    'review': agent.review_count,
+                    'completed': agent.completed_count,
+                    'failed': agent.failed_count,
+                },
+                'load': {
+                    'active': active_load,
+                    'queued': queued_load,
+                    'open_total': total_open,
+                },
+            })
+
+        payload.sort(key=lambda item: item['load']['open_total'], reverse=True)
+        return Response(payload)
+
 
 class EpicViewSet(viewsets.ModelViewSet):
     """
@@ -501,6 +611,68 @@ class TaskViewSet(viewsets.ModelViewSet):
     search_fields = ['title', 'description']
     ordering_fields = ['created_at', 'updated_at', 'priority']
     ordering = ['-created_at']
+
+    def get_serializer_class(self):
+        if self.action in ('retrieve', 'workspace'):
+            return TaskDetailSerializer
+        return TaskSerializer
+
+    def perform_create(self, serializer):
+        task = serializer.save()
+        record_task_event(task, 'created', 'Tarefa criada', metadata={'status': task.status, 'priority': task.priority})
+
+    def perform_update(self, serializer):
+        previous = serializer.instance
+        previous_assigned_to = previous.assigned_to
+        previous_status = previous.status
+        previous_due_at = previous.due_at
+        previous_error = previous.error
+
+        task = serializer.save()
+
+        if previous_assigned_to != task.assigned_to:
+            from_name = previous_assigned_to.name if previous_assigned_to else 'Sem responsável'
+            to_name = task.assigned_to.name if task.assigned_to else 'Sem responsável'
+            record_task_event(
+                task,
+                'assigned',
+                f'Handoff de responsabilidade: {from_name} -> {to_name}',
+                agent=task.assigned_to,
+                metadata={
+                    'from_agent_id': str(previous_assigned_to.id) if previous_assigned_to else None,
+                    'to_agent_id': str(task.assigned_to.id) if task.assigned_to else None,
+                },
+            )
+
+        if previous_status != task.status:
+            record_task_event(
+                task,
+                'updated',
+                f'Status alterado: {previous_status} -> {task.status}',
+                agent=task.assigned_to,
+                metadata={'from_status': previous_status, 'to_status': task.status},
+            )
+
+        if previous_due_at != task.due_at:
+            record_task_event(
+                task,
+                'updated',
+                'Prazo da tarefa atualizado',
+                agent=task.assigned_to,
+                metadata={
+                    'from_due_at': previous_due_at.isoformat() if previous_due_at else None,
+                    'to_due_at': task.due_at.isoformat() if task.due_at else None,
+                },
+            )
+
+        if previous_error != task.error and task.error:
+            record_task_event(
+                task,
+                'blocked' if task.status == 'blocked' else 'updated',
+                f'Motivo atualizado: {task.error[:180]}',
+                agent=task.assigned_to,
+                metadata={'status': task.status},
+            )
     
     @action(detail=True, methods=['post'])
     def execute(self, request, pk=None):
@@ -580,6 +752,7 @@ class TaskViewSet(viewsets.ModelViewSet):
         task.error = ''
         task.result = None
         task.save(update_fields=['status', 'error', 'result'])
+        record_task_event(task, 'updated', 'Tarefa reencaminhada para nova execução', metadata={'status': task.status})
         return self.execute(request, pk=pk)
 
     @action(detail=True, methods=['post'])
@@ -600,6 +773,7 @@ class TaskViewSet(viewsets.ModelViewSet):
         task.status = 'blocked'
         task.error = 'Aguardando esclarecimento do piloto'
         task.save(update_fields=['status', 'error'])
+        record_task_event(task, 'blocked', 'Tarefa bloqueada aguardando esclarecimento do piloto', agent=task.assigned_to, metadata={'question': question, 'clarification_id': str(req.id)})
 
         if task.assigned_to:
             task.assigned_to.state = 'blocked'
@@ -634,6 +808,13 @@ class TaskViewSet(viewsets.ModelViewSet):
         serializer = ThoughtLogSerializer(logs, many=True)
         return Response(serializer.data)
 
+    @action(detail=True, methods=['get'])
+    def workspace(self, request, pk=None):
+        """Retorna a workspace operacional da tarefa com eventos, artefatos e subtarefas."""
+        task = self.get_object()
+        serializer = TaskDetailSerializer(task)
+        return Response(serializer.data)
+
     @action(detail=True, methods=['post'])
     def file_change_preview(self, request, pk=None):
         """Gera diff e valida policy sem alterar arquivos."""
@@ -648,15 +829,278 @@ class TaskViewSet(viewsets.ModelViewSet):
         return Response(preview, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
+    def request_approval(self, request, pk=None):
+        """Cria solicitação formal de aprovação para artefato sensível."""
+        task = self.get_object()
+        artifact_id = (request.data.get('artifact_id') or '').strip()
+        rationale = (request.data.get('rationale') or '').strip()
+
+        if not artifact_id:
+            return Response({'error': 'artifact_id é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
+
+        artifact = Artifact.objects.filter(id=artifact_id, task=task).first()
+        if not artifact:
+            return Response({'error': 'Artefato não encontrado para esta tarefa'}, status=status.HTTP_404_NOT_FOUND)
+
+        pending = ApprovalRequest.objects.filter(task=task, artifact=artifact, status='pending').first()
+        if pending:
+            return Response(ApprovalRequestSerializer(pending).data, status=status.HTTP_200_OK)
+
+        approval = ApprovalRequest.objects.create(
+            task=task,
+            artifact=artifact,
+            requested_by_agent=task.assigned_to,
+            requested_by_user=request.user if request.user.is_authenticated else None,
+            rationale=rationale or f'Aprovação necessária para aplicar mudança em {artifact.relative_path or artifact.title}',
+        )
+
+        DecisionRecord.objects.create(
+            task=task,
+            artifact=artifact,
+            approval_request=approval,
+            created_by_agent=task.assigned_to,
+            created_by_user=request.user if request.user.is_authenticated else None,
+            title=f'Decidir aplicação de {artifact.relative_path or artifact.title}',
+            summary='Mudança sensível aguardando decisão formal antes de aplicar no workspace.',
+            rationale=approval.rationale,
+            scope='task',
+            status='proposed',
+            impact='high' if artifact.artifact_type == 'diff' else 'medium',
+        )
+
+        task.status = 'blocked'
+        task.error = 'Aguardando aprovação formal para aplicar artefato sensível'
+        task.save(update_fields=['status', 'error'])
+
+        record_task_event(
+            task,
+            'approval_requested',
+            f'Aprovação solicitada para artefato: {artifact.title}',
+            agent=task.assigned_to,
+            metadata={'approval_id': str(approval.id), 'artifact_id': str(artifact.id)},
+        )
+
+        return Response(ApprovalRequestSerializer(approval).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'])
+    def decide_approval(self, request, pk=None):
+        """Registra decisão formal da solicitação de aprovação."""
+        task = self.get_object()
+        approval_id = (request.data.get('approval_id') or '').strip()
+        decision = (request.data.get('decision') or '').strip().lower()
+        notes = (request.data.get('notes') or '').strip()
+
+        if not approval_id:
+            return Response({'error': 'approval_id é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if decision not in ('approved', 'rejected'):
+            return Response({'error': 'decision deve ser approved ou rejected'}, status=status.HTTP_400_BAD_REQUEST)
+
+        approval = ApprovalRequest.objects.filter(id=approval_id, task=task, status='pending').select_related('artifact').first()
+        if not approval:
+            return Response({'error': 'Solicitação pendente não encontrada'}, status=status.HTTP_404_NOT_FOUND)
+
+        approval.status = decision
+        approval.decision_notes = notes
+        approval.decided_by = request.user if request.user.is_authenticated else None
+        approval.decided_at = timezone.now()
+        approval.save(update_fields=['status', 'decision_notes', 'decided_by', 'decided_at', 'updated_at'])
+
+        decision_record = DecisionRecord.objects.filter(approval_request=approval, task=task).order_by('-created_at').first()
+        if decision_record:
+            decision_record.status = 'accepted' if decision == 'approved' else 'rejected'
+            decision_record.decided_by = request.user if request.user.is_authenticated else None
+            decision_record.decided_at = approval.decided_at
+            decision_record.summary = notes or decision_record.summary
+            decision_record.save(update_fields=['status', 'decided_by', 'decided_at', 'summary', 'updated_at'])
+
+        if decision == 'approved':
+            if approval.artifact and approval.artifact.status == 'proposed':
+                approval.artifact.status = 'approved'
+                approval.artifact.save(update_fields=['status', 'updated_at'])
+            task.error = 'Aprovação concedida. Pronto para aplicar mudança.'
+            record_task_event(
+                task,
+                'approved',
+                f'Aprovação concedida para artefato: {approval.artifact.title if approval.artifact else "n/a"}',
+                agent=task.assigned_to,
+                metadata={'approval_id': str(approval.id), 'artifact_id': str(approval.artifact_id) if approval.artifact_id else None},
+            )
+        else:
+            task.error = notes or 'Solicitação de aprovação rejeitada'
+            record_task_event(
+                task,
+                'blocked',
+                f'Aprovação rejeitada para artefato: {approval.artifact.title if approval.artifact else "n/a"}',
+                agent=task.assigned_to,
+                metadata={'approval_id': str(approval.id), 'artifact_id': str(approval.artifact_id) if approval.artifact_id else None},
+            )
+
+        task.status = 'blocked'
+        task.save(update_fields=['status', 'error'])
+
+        return Response(ApprovalRequestSerializer(approval).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def create_decision(self, request, pk=None):
+        """Cria registro manual de decisão vinculado à task."""
+        task = self.get_object()
+        title = (request.data.get('title') or '').strip()
+        summary = (request.data.get('summary') or '').strip()
+        rationale = (request.data.get('rationale') or '').strip()
+        scope = (request.data.get('scope') or 'task').strip()
+        impact = (request.data.get('impact') or 'medium').strip()
+        artifact_id = (request.data.get('artifact_id') or '').strip()
+
+        if not title:
+            return Response({'error': 'title é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
+
+        artifact = None
+        if artifact_id:
+            artifact = Artifact.objects.filter(id=artifact_id, task=task).first()
+            if not artifact:
+                return Response({'error': 'artifact_id inválido para esta task'}, status=status.HTTP_400_BAD_REQUEST)
+
+        decision = DecisionRecord.objects.create(
+            task=task,
+            artifact=artifact,
+            created_by_agent=task.assigned_to,
+            created_by_user=request.user if request.user.is_authenticated else None,
+            title=title,
+            summary=summary,
+            rationale=rationale,
+            scope=scope if scope in {'task', 'epic', 'org'} else 'task',
+            status='accepted',
+            impact=impact if impact in {'low', 'medium', 'high'} else 'medium',
+            decided_by=request.user if request.user.is_authenticated else None,
+            decided_at=timezone.now(),
+        )
+
+        record_task_event(
+            task,
+            'updated',
+            f'Decisão registrada: {decision.title}',
+            agent=task.assigned_to,
+            metadata={'decision_id': str(decision.id), 'impact': decision.impact, 'scope': decision.scope},
+        )
+
+        create_artifact(
+            title=f'Decisão: {decision.title}',
+            artifact_type='decision',
+            task=task,
+            epic=task.epic,
+            agent=task.assigned_to,
+            status='available',
+            preview=decision.summary,
+            content=decision.rationale,
+            payload={
+                'decision_id': str(decision.id),
+                'status': decision.status,
+                'impact': decision.impact,
+                'scope': decision.scope,
+            },
+        )
+
+        return Response(DecisionRecordSerializer(decision).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'])
+    def supersede_decision(self, request, pk=None):
+        """Marca decisão atual como substituída e cria nova decisão sucessora."""
+        task = self.get_object()
+        decision_id = (request.data.get('decision_id') or '').strip()
+        replacement_title = (request.data.get('replacement_title') or '').strip()
+        replacement_summary = (request.data.get('replacement_summary') or '').strip()
+        replacement_rationale = (request.data.get('replacement_rationale') or '').strip()
+
+        if not decision_id:
+            return Response({'error': 'decision_id é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
+        if not replacement_title:
+            return Response({'error': 'replacement_title é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
+
+        previous = DecisionRecord.objects.filter(id=decision_id, task=task).first()
+        if not previous:
+            return Response({'error': 'Decisão não encontrada para esta task'}, status=status.HTTP_404_NOT_FOUND)
+
+        previous.status = 'superseded'
+        previous.decided_by = request.user if request.user.is_authenticated else previous.decided_by
+        previous.decided_at = timezone.now()
+        previous.save(update_fields=['status', 'decided_by', 'decided_at', 'updated_at'])
+
+        replacement = DecisionRecord.objects.create(
+            task=task,
+            artifact=previous.artifact,
+            approval_request=previous.approval_request,
+            supersedes=previous,
+            created_by_agent=task.assigned_to,
+            created_by_user=request.user if request.user.is_authenticated else None,
+            decided_by=request.user if request.user.is_authenticated else None,
+            title=replacement_title,
+            summary=replacement_summary,
+            rationale=replacement_rationale,
+            scope=previous.scope,
+            status='accepted',
+            impact=previous.impact,
+            decided_at=timezone.now(),
+        )
+
+        record_task_event(
+            task,
+            'updated',
+            f'Decisão substituída: {previous.title} -> {replacement.title}',
+            agent=task.assigned_to,
+            metadata={
+                'decision_id': str(previous.id),
+                'replacement_decision_id': str(replacement.id),
+            },
+        )
+
+        create_artifact(
+            title=f'Decisão substituída: {replacement.title}',
+            artifact_type='decision',
+            task=task,
+            epic=task.epic,
+            agent=task.assigned_to,
+            status='available',
+            preview=replacement.summary,
+            content=replacement.rationale,
+            payload={
+                'decision_id': str(replacement.id),
+                'supersedes': str(previous.id),
+                'status': replacement.status,
+                'impact': replacement.impact,
+                'scope': replacement.scope,
+            },
+        )
+
+        return Response(DecisionRecordSerializer(replacement).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'])
     def apply_file_change(self, request, pk=None):
         """Aplica mudança de arquivo somente com aprovação explícita."""
         task = self.get_object()
         relative_path = (request.data.get('relative_path') or '').strip()
         new_content = request.data.get('new_content') or ''
         approved = bool(request.data.get('approved', False))
+        artifact_id = (request.data.get('artifact_id') or '').strip()
+        approval_request_id = (request.data.get('approval_request_id') or '').strip()
 
         if not relative_path:
             return Response({'error': 'relative_path é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
+
+        approval = None
+        if approved:
+            if not approval_request_id:
+                return Response({'error': 'approval_request_id é obrigatório para aplicar mudança'}, status=status.HTTP_400_BAD_REQUEST)
+
+            approval = ApprovalRequest.objects.filter(id=approval_request_id, task=task, status='approved').select_related('artifact').first()
+            if not approval:
+                return Response({'error': 'Aprovação válida não encontrada para esta tarefa'}, status=status.HTTP_400_BAD_REQUEST)
+
+            if artifact_id and approval.artifact_id and str(approval.artifact_id) != artifact_id:
+                return Response({'error': 'approval_request_id não corresponde ao artifact_id informado'}, status=status.HTTP_400_BAD_REQUEST)
+
+            if approval.artifact and approval.artifact.relative_path and approval.artifact.relative_path != relative_path:
+                return Response({'error': 'A aprovação não corresponde ao arquivo solicitado'}, status=status.HTTP_400_BAD_REQUEST)
 
         result = apply_file_change(
             task_id=str(task.id),
@@ -668,7 +1112,61 @@ class TaskViewSet(viewsets.ModelViewSet):
         if task.result is None or not isinstance(task.result, dict):
             task.result = {}
         task.result['last_file_change'] = result
-        task.save(update_fields=['result'])
+
+        if result.get('applied'):
+            file_change_plan = task.result.get('file_change_plan') or []
+            updated_plan = []
+            for item in file_change_plan:
+                if item.get('relative_path') == relative_path:
+                    item = {
+                        **item,
+                        'applied': True,
+                        'applied_at': timezone.now().isoformat(),
+                        'snapshot_id': result.get('snapshot', {}).get('snapshot_id', ''),
+                    }
+                updated_plan.append(item)
+            task.result['file_change_plan'] = updated_plan
+
+            Artifact.objects.filter(
+                task=task,
+                artifact_type='diff',
+                relative_path=relative_path,
+                status='proposed',
+            ).update(status='applied', payload=result)
+
+            if artifact_id:
+                Artifact.objects.filter(id=artifact_id, task=task).update(status='applied', payload=result)
+
+            create_artifact(
+                title=f'Mudança aplicada: {relative_path}',
+                artifact_type='diff',
+                task=task,
+                epic=task.epic,
+                agent=task.assigned_to,
+                status='applied',
+                relative_path=relative_path,
+                preview=result.get('diff', ''),
+                payload=result,
+            )
+            record_task_event(
+                task,
+                'approved',
+                f'Mudança aprovada e aplicada em {relative_path}',
+                agent=task.assigned_to,
+                metadata={
+                    'relative_path': relative_path,
+                    'approval_id': str(approval.id) if approval else None,
+                    'artifact_id': artifact_id or (str(approval.artifact_id) if approval and approval.artifact_id else None),
+                },
+            )
+
+            if updated_plan and all(item.get('applied') for item in updated_plan):
+                task.status = 'review'
+                task.error = ''
+                record_task_event(task, 'updated', 'Todas as mudanças propostas foram aplicadas; tarefa movida para revisão', agent=task.assigned_to)
+
+        task.save(update_fields=['result', 'status', 'error'] if result.get('applied') else ['result'])
+        result['task_status'] = task.status
 
         http_status = status.HTTP_200_OK if result.get('applied') else status.HTTP_400_BAD_REQUEST
         return Response(result, status=http_status)
@@ -682,6 +1180,17 @@ class TaskViewSet(viewsets.ModelViewSet):
             return Response({'error': 'snapshot_id é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
 
         result = rollback_snapshot(str(task.id), snapshot_id)
+        if result.get('rolled_back'):
+            create_artifact(
+                title=f'Rollback do snapshot {snapshot_id}',
+                artifact_type='snapshot',
+                task=task,
+                epic=task.epic,
+                agent=task.assigned_to,
+                status='available',
+                payload=result,
+            )
+            record_task_event(task, 'rolled_back', f'Rollback executado para o snapshot {snapshot_id}', agent=task.assigned_to, metadata=result)
         http_status = status.HTTP_200_OK if result.get('rolled_back') else status.HTTP_400_BAD_REQUEST
         return Response(result, status=http_status)
 
@@ -693,6 +1202,7 @@ class TaskViewSet(viewsets.ModelViewSet):
         task.result = request.data.get('result', {})
         task.completed_at = timezone.now()
         task.save()
+        record_task_event(task, 'completed', 'Tarefa concluída manualmente', agent=task.assigned_to)
 
         if task.assigned_to:
             task.assigned_to.state = 'idle'
@@ -709,6 +1219,7 @@ class TaskViewSet(viewsets.ModelViewSet):
         task.error = request.data.get('error', '')
         task.completed_at = timezone.now()
         task.save()
+        record_task_event(task, 'failed', 'Tarefa marcada como falha manualmente', agent=task.assigned_to, metadata={'error': task.error})
 
         if task.assigned_to:
             task.assigned_to.state = 'idle'
@@ -821,6 +1332,42 @@ class ClarificationRequestViewSet(viewsets.ModelViewSet):
         })
 
         return Response(ClarificationRequestSerializer(item).data)
+
+
+class SubtaskViewSet(viewsets.ModelViewSet):
+    """CRUD leve para subtarefas operacionais."""
+    queryset = Subtask.objects.all().select_related('task', 'assigned_to')
+    serializer_class = SubtaskSerializer
+    permission_classes = [AllowAny]
+    filterset_fields = ['task', 'status', 'priority', 'assigned_to', 'source']
+    search_fields = ['title', 'description']
+    ordering_fields = ['created_at', 'updated_at', 'order', 'priority']
+    ordering = ['task', 'order', 'created_at']
+
+    def perform_create(self, serializer):
+        subtask = serializer.save()
+        record_task_event(
+            subtask.task,
+            'decomposed',
+            f'Subtarefa criada manualmente: {subtask.title}',
+            agent=subtask.assigned_to or subtask.task.assigned_to,
+            metadata={'subtask_id': str(subtask.id), 'source': subtask.source},
+        )
+
+    def perform_update(self, serializer):
+        previous = serializer.instance
+        subtask = serializer.save()
+        record_task_event(
+            subtask.task,
+            'updated',
+            f'Subtarefa atualizada: {subtask.title}',
+            agent=subtask.assigned_to or subtask.task.assigned_to,
+            metadata={
+                'subtask_id': str(subtask.id),
+                'previous_status': previous.status,
+                'status': subtask.status,
+            },
+        )
 
 
 class HealthCheckAPIView(APIView):
@@ -1089,6 +1636,36 @@ class ChatAPIView(APIView):
                     'user_message': user_message,
                     'agent_response': clarification,
                     'action': 'operational_clarification',
+                    'created_at': chat_message.created_at,
+                }, status=status.HTTP_200_OK)
+
+            if action.get('type') == 'review_refinement_epics':
+                review_msg, count = _build_refinement_review_message()
+                chat_message = ChatMessage.objects.create(
+                    agent=agent,
+                    user=chat_user,
+                    user_message=user_message,
+                    agent_response=review_msg,
+                    context={
+                        **context,
+                        'action': 'review_refinement_epics',
+                        'result': 'completed',
+                        'epics_found': count,
+                    }
+                )
+                if stream:
+                    from django.http import StreamingHttpResponse
+                    return StreamingHttpResponse(iter([f"data: {review_msg}\n\n"]), content_type='text/event-stream')
+
+                return Response({
+                    'id': str(chat_message.id),
+                    'agent': agent.name,
+                    'agent_id': str(agent.id),
+                    'user_message': user_message,
+                    'agent_response': review_msg,
+                    'action': 'review_refinement_epics',
+                    'reviewed': True,
+                    'epics_found': count,
                     'created_at': chat_message.created_at,
                 }, status=status.HTTP_200_OK)
 

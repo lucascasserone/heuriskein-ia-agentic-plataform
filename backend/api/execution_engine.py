@@ -10,6 +10,7 @@ from django.utils import timezone
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from api.file_sandbox import SandboxPolicy, create_snapshot, preview_file_change, task_workspace
+from api.work_tracking import create_artifact, create_subtask, record_task_event
 
 
 # ──────────────────────────────────────────────────────────────
@@ -203,9 +204,20 @@ def _run_task(task_id: str):
         _broadcast_agent(agent)
 
     _log(agent, task, f"🧠 Analisando tarefa: {task.title}")
+    record_task_event(task, 'started', 'Agente iniciou análise da tarefa', agent=agent)
 
     snapshot_info = create_snapshot(str(task.id))
     _log(agent, task, f"🧷 Snapshot criado: {snapshot_info.get('snapshot_id')}")
+    create_artifact(
+        title=f"Snapshot inicial {snapshot_info.get('snapshot_id')}",
+        artifact_type='snapshot',
+        task=task,
+        epic=task.epic,
+        agent=agent,
+        status='available',
+        payload=snapshot_info,
+    )
+    record_task_event(task, 'artifact_added', 'Snapshot inicial do workspace criado', agent=agent, metadata=snapshot_info)
 
     try:
         llm = get_llm_service()
@@ -238,17 +250,48 @@ def _run_task(task_id: str):
 
     # ── Parse sections from response ────────────────────────
     result = _parse_response(response_text)
+    subtask_specs = _extract_subtask_specs(response_text)
+    result['subtasks'] = subtask_specs
+
     file_change_plan = _extract_file_change_plan(str(task.id), response_text)
     if file_change_plan:
         result['file_change_plan'] = file_change_plan
         result['requires_approval'] = True
         _log(agent, task, f"📝 {len(file_change_plan)} mudança(s) de arquivo proposta(s) com diff.")
+        for preview in file_change_plan:
+            create_artifact(
+                title=f"Proposta de mudança: {preview.get('relative_path')}",
+                artifact_type='diff',
+                task=task,
+                epic=task.epic,
+                agent=agent,
+                status='proposed',
+                relative_path=preview.get('relative_path', ''),
+                preview=preview.get('diff', ''),
+                content=preview.get('new_content', ''),
+                payload=preview,
+            )
+        record_task_event(
+            task,
+            'approval_requested',
+            f'{len(file_change_plan)} mudança(s) de arquivo aguardando aprovação',
+            agent=agent,
+            metadata={'count': len(file_change_plan)},
+        )
 
-    # ── Save result & mark completed ────────────────────────
-    task.status = "completed"
+    # ── Persist result and route to approval when file changes exist ──────
     task.result = result
-    task.completed_at = timezone.now()
-    task.save(update_fields=["status", "result", "completed_at"])
+    if file_change_plan:
+        task.status = "blocked"
+        task.error = "Aguardando aprovação de mudanças de arquivo"
+        task.completed_at = None
+        task.save(update_fields=["status", "result", "error", "completed_at"])
+        record_task_event(task, 'blocked', task.error, agent=agent)
+    else:
+        task.status = "completed"
+        task.completed_at = timezone.now()
+        task.save(update_fields=["status", "result", "completed_at"])
+        record_task_event(task, 'completed', 'Tarefa concluída com sucesso', agent=agent, metadata={'summary': result.get('summary', '')})
     _broadcast_task(task)
 
     if agent:
@@ -261,9 +304,10 @@ def _run_task(task_id: str):
     _log(agent, task, "✅ Tarefa concluída com sucesso.")
 
     # ── Auto-create subtasks from LLM output ────────────────
-    subtask_count = _create_subtasks_from_result(task, response_text)
+    subtask_count = _create_subtasks_from_result(task, subtask_specs, agent=agent)
     if subtask_count:
         _log(agent, task, f"📋 {subtask_count} subtarefa(s) gerada(s) automaticamente.")
+        record_task_event(task, 'decomposed', f'{subtask_count} subtarefa(s) gerada(s) automaticamente', agent=agent, metadata={'count': subtask_count})
 
 
 def _fail_task(task, agent, error_msg: str):
@@ -273,6 +317,7 @@ def _fail_task(task, agent, error_msg: str):
     task.completed_at = timezone.now()
     task.save(update_fields=["status", "error", "completed_at"])
     _broadcast_task(task)
+    record_task_event(task, 'failed', error_msg, agent=agent, metadata={'error': error_msg})
 
     if agent:
         agent.state = "error" if "error" in [s[0] for s in agent._meta.model.AGENT_STATES] else "idle"
@@ -284,29 +329,41 @@ def _fail_task(task, agent, error_msg: str):
     _log(agent, task, f"❌ Falha na execução: {error_msg}", level="error")
 
 
-def _create_subtasks_from_result(task, raw_text: str) -> int:
-    """Parse [SUBTAREFA: title || description || priority] markers and create Task objects."""
-    import re as _re
-    from api.models import Task as TaskModel
-
-    pattern = _re.compile(
+def _extract_subtask_specs(raw_text: str) -> list[dict]:
+    """Parse [SUBTAREFA: title || description || priority] markers into structured specs."""
+    pattern = re.compile(
         r'\[SUBTAREFA:\s*(.+?)\s*\|\|\s*(.+?)\s*\|\|\s*(low|medium|high)\s*\]',
-        _re.IGNORECASE | _re.DOTALL,
+        re.IGNORECASE | re.DOTALL,
     )
-    created = 0
+
+    items: list[dict] = []
     for match in pattern.finditer(raw_text):
         title = match.group(1).strip()[:255]
         description = match.group(2).strip()
         priority = match.group(3).strip().lower()
-        if not title:
-            continue
+        if title:
+            items.append({
+                'title': title,
+                'description': description,
+                'priority': priority,
+            })
+
+    return items
+
+
+def _create_subtasks_from_result(task, subtask_specs: list[dict], agent=None) -> int:
+    """Persist structured subtasks linked to the parent task."""
+    created = 0
+    for order, spec in enumerate(subtask_specs, start=1):
         try:
-            TaskModel.objects.create(
-                title=title,
-                description=description,
-                priority=priority,
-                status='queue',
-                epic=task.epic if hasattr(task, 'epic') else None,
+            create_subtask(
+                task=task,
+                title=spec['title'],
+                description=spec.get('description', ''),
+                priority=spec.get('priority', 'medium'),
+                assigned_to=agent,
+                source='agent',
+                order=order,
             )
             created += 1
         except Exception:
@@ -359,7 +416,20 @@ def _parse_response(text: str) -> dict:
     if not any(sections[k] for k in ["análise", "execução", "resultado"]):
         sections["resultado"] = text.strip()
 
-    return sections
+    next_steps = [line.strip(' -\t') for line in sections["próximos_passos"].splitlines() if line.strip()]
+    summary = sections["resultado"] or sections["execução"] or text.strip()
+    summary = summary.splitlines()[0].strip() if summary else ''
+
+    return {
+        "summary": summary,
+        "analysis": sections["análise"],
+        "execution": sections["execução"],
+        "resultado": sections["resultado"],
+        "next_action": next_steps[0] if next_steps else '',
+        "next_steps": next_steps,
+        "próximos_passos": sections["próximos_passos"],
+        "raw": text,
+    }
 
 
 def _extract_file_change_plan(task_id: str, text: str) -> list[dict]:
@@ -378,6 +448,7 @@ def _extract_file_change_plan(task_id: str, text: str) -> list[dict]:
             relative_path=relative_path,
             new_content=new_content,
         )
+        preview['new_content'] = new_content
         plan.append(preview)
 
     return plan

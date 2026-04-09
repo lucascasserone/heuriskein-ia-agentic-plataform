@@ -7,7 +7,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView
 from api.views import (
-    AgentViewSet, TaskViewSet, EpicViewSet, 
+    AgentViewSet, TaskViewSet, EpicViewSet, SubtaskViewSet,
     HealthCheckAPIView, ChatAPIView,
     RegisterAPIView, LoginAPIView, UserDetailAPIView,
     ClarificationRequestViewSet, MetricsOverviewAPIView, MetricsTimeseriesAPIView
@@ -24,6 +24,7 @@ router = DefaultRouter()
 router.register(r'agents', AgentViewSet, basename='agent')
 router.register(r'tasks', TaskViewSet, basename='task')
 router.register(r'epics', EpicViewSet, basename='epic')
+router.register(r'subtasks', SubtaskViewSet, basename='subtask')
 router.register(r'clarifications', ClarificationRequestViewSet, basename='clarification')
 
 urlpatterns = [

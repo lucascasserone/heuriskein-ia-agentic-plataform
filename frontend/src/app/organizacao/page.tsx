@@ -40,6 +40,18 @@ interface AgentMessage {
   timestamp: string;
 }
 
+interface OrgFocusPayload {
+  taskId?: string;
+  title?: string;
+  status?: string;
+  priority?: string;
+  agentId?: string;
+}
+
+function normalize(value: string) {
+  return value.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
 export default function OrganizacaoAutonomaPage() {
   const [state, setState] = useState<CompanyStateResponse>(EMPTY_STATE);
   const [loading, setLoading] = useState(false);
@@ -57,6 +69,7 @@ export default function OrganizacaoAutonomaPage() {
   const [showFactoryDrawer, setShowFactoryDrawer] = useState(false);
   const [showAdvancedMissionFields, setShowAdvancedMissionFields] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [focusSourceLabel, setFocusSourceLabel] = useState('');
 
   const stats = useMemo(() => {
     const tasks = Object.values(state.task_tree || {});
@@ -80,6 +93,27 @@ export default function OrganizacaoAutonomaPage() {
     return state.task_tree[selectedTaskId] || null;
   }, [selectedTaskId, state.task_tree]);
 
+  const selectedTaskDelegation = useMemo(() => {
+    if (!selectedTask) return null;
+
+    const immediateParent = selectedTask.parent_id ? state.task_tree[selectedTask.parent_id] : null;
+    let headSupervisor: OrgTaskNode | null = null;
+    let cursor = immediateParent;
+
+    while (cursor) {
+      if (cursor.level === 'head') {
+        headSupervisor = cursor;
+        break;
+      }
+      cursor = cursor.parent_id ? state.task_tree[cursor.parent_id] : null;
+    }
+
+    return {
+      parent: immediateParent,
+      head: headSupervisor,
+    };
+  }, [selectedTask, state.task_tree]);
+
   const selectedChatHistory = useMemo(() => {
     if (!selectedTaskId) return [];
     return chatHistoryByTaskId[selectedTaskId] || [];
@@ -102,6 +136,81 @@ export default function OrganizacaoAutonomaPage() {
   useEffect(() => {
     loadLatest();
   }, []);
+
+  useEffect(() => {
+    const applyFocusByAgent = (agentId: string) => {
+      if (!agentId) return;
+      const firstTask = Object.values(state.task_tree || {}).find((task) => task.agent_id === agentId);
+      if (firstTask) {
+        setSelectedTaskId(firstTask.id);
+      }
+    };
+
+    const applyFocusByPayload = (payload: OrgFocusPayload) => {
+      const tasks = Object.values(state.task_tree || {});
+      if (tasks.length === 0) return;
+
+      const titleNorm = normalize(payload.title || '');
+      let bestId: string | null = null;
+      let bestScore = -1;
+
+      tasks.forEach((task) => {
+        let score = 0;
+        if (payload.agentId && task.agent_id === payload.agentId) score += 5;
+        if (titleNorm) {
+          const objectiveNorm = normalize(task.objective || '');
+          const taskTitleNorm = normalize(task.title || '');
+          if (objectiveNorm.includes(titleNorm) || titleNorm.includes(objectiveNorm)) score += 4;
+          if (taskTitleNorm.includes(titleNorm) || titleNorm.includes(taskTitleNorm)) score += 3;
+        }
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestId = task.id;
+        }
+      });
+
+      if (bestId) {
+        setSelectedTaskId(bestId);
+      }
+    };
+
+    const fromStorage = typeof window !== 'undefined' ? localStorage.getItem('org_focus_agent') : null;
+    if (fromStorage) {
+      applyFocusByAgent(fromStorage);
+      localStorage.removeItem('org_focus_agent');
+      setFocusSourceLabel('Foco aplicado por agente vindo do kanban');
+    }
+
+    const fromPayloadRaw = typeof window !== 'undefined' ? localStorage.getItem('org_focus_payload') : null;
+    if (fromPayloadRaw) {
+      try {
+        const payload = JSON.parse(fromPayloadRaw) as OrgFocusPayload;
+        applyFocusByPayload(payload);
+        setFocusSourceLabel(`Foco aplicado para: ${payload.title || 'task do kanban'}`);
+      } catch {
+        // ignore malformed payload
+      }
+      localStorage.removeItem('org_focus_payload');
+    }
+
+    const onOrgFocus = (event: Event) => {
+      const detail = (event as CustomEvent<{ agentId?: string }>).detail;
+      if (detail?.agentId) {
+        applyFocusByAgent(detail.agentId);
+      }
+    };
+
+    window.addEventListener('org:focus-agent', onOrgFocus as EventListener);
+    return () => {
+      window.removeEventListener('org:focus-agent', onOrgFocus as EventListener);
+    };
+  }, [state.task_tree]);
+
+  useEffect(() => {
+    if (!selectedTask?.agent_id || typeof window === 'undefined') return;
+    window.dispatchEvent(new CustomEvent('kanban:filter-agent', { detail: { agentId: selectedTask.agent_id } }));
+  }, [selectedTask]);
 
   const runMission = async () => {
     setLoading(true);
@@ -181,7 +290,8 @@ export default function OrganizacaoAutonomaPage() {
         task_id: task.id,
         task_title: task.title,
       });
-      const agentContent = String(response.data?.agent_response || response.data?.response || 'Sem resposta do agente.');
+      const payload = response.data as { agent_response?: string; response?: string } | null;
+      const agentContent = String(payload?.agent_response || payload?.response || 'Sem resposta do agente.');
       setChatHistoryByTaskId((prev) => ({
         ...prev,
         [task.id]: [
@@ -262,6 +372,12 @@ export default function OrganizacaoAutonomaPage() {
               <p className="text-lg font-bold text-text-title">{stats.avgResolutionMinutes}m</p>
             </div>
           </div>
+          {focusSourceLabel ? (
+            <div className="mt-2 inline-flex items-center gap-2 rounded-md border border-cyan-300/35 bg-cyan-500/10 px-3 py-1.5 text-xs text-cyan-200">
+              <Sparkles size={12} />
+              {focusSourceLabel}
+            </div>
+          ) : null}
         </div>
 
         <div className="grid grid-cols-1 xl:grid-cols-12 gap-3">
@@ -343,6 +459,8 @@ export default function OrganizacaoAutonomaPage() {
             <LiveOrgChart
               taskTree={state.task_tree}
               rootTaskId={state.root_task_id}
+              activeTaskId={state.active_task_id}
+              pendingQueue={state.pending_queue}
               agentProfiles={state.agent_profiles}
               selectedTaskId={selectedTaskId}
               onSelectTask={setSelectedTaskId}
@@ -369,6 +487,12 @@ export default function OrganizacaoAutonomaPage() {
                 <p className="text-text-title font-semibold mb-1">Estado atual</p>
                 <p>{selectedTask.status}</p>
                 <p className="mt-1">Complexidade: {selectedTask.complexity}</p>
+              </div>
+
+              <div className="rounded-md border border-cyan-400/25 bg-cyan-500/10 p-2 text-xs text-cyan-100">
+                <p className="font-semibold mb-1">Contexto de delegacao</p>
+                <p>Head responsável: {selectedTaskDelegation?.head?.title || 'Nao identificado'}</p>
+                <p className="mt-1">Origem imediata: {selectedTaskDelegation?.parent?.title || 'Raiz da missão'}</p>
               </div>
 
               <div className="space-y-2">

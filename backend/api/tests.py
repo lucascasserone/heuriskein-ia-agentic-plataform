@@ -3,7 +3,9 @@
 from django.test import TestCase
 from django.contrib.auth.models import User
 from rest_framework.test import APIClient
-from api.models import Agent, Task, Epic
+from unittest.mock import patch
+from api.models import Agent, Task, Epic, Artifact, TaskEvent, Subtask, ApprovalRequest, DecisionRecord
+from api.execution_engine import _extract_subtask_specs
 
 
 class AgentAPITest(TestCase):
@@ -33,6 +35,26 @@ class AgentAPITest(TestCase):
         response = self.client.get('/api/v1/agents/')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.data['results']), 1)
+
+    def test_agent_capacity_endpoint(self):
+        agent = Agent.objects.create(
+            name='Capacity Agent',
+            type='executor',
+            model='claude-3-opus',
+            state='idle',
+        )
+        Task.objects.create(title='Q1', status='queue', assigned_to=agent)
+        Task.objects.create(title='P1', status='processing', assigned_to=agent)
+        Task.objects.create(title='B1', status='blocked', assigned_to=agent)
+
+        response = self.client.get('/api/v1/agents/capacity/')
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(len(response.data) >= 1)
+        item = next((row for row in response.data if row['id'] == str(agent.id)), None)
+        self.assertIsNotNone(item)
+        self.assertEqual(item['counts']['queue'], 1)
+        self.assertEqual(item['counts']['processing'], 1)
+        self.assertEqual(item['counts']['blocked'], 1)
 
 
 class TaskAPITest(TestCase):
@@ -64,8 +86,400 @@ class TaskAPITest(TestCase):
             type='executor',
             model='claude-3-opus',
         )
-        response = self.client.post(f'/api/v1/tasks/{task.id}/execute/')
+        with patch('api.views.execute_task_async') as mocked_execute:
+            response = self.client.post(f'/api/v1/tasks/{task.id}/execute/')
+
         self.assertEqual(response.status_code, 202)
+        mocked_execute.assert_called_once()
+
+    def test_update_task_due_at(self):
+        task = Task.objects.create(
+            title='Planejar release',
+            description='Definir prazo de entrega.',
+            status='queue',
+        )
+
+        response = self.client.patch(
+            f'/api/v1/tasks/{task.id}/',
+            {
+                'due_at': '2026-04-20T15:30:00Z',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        task.refresh_from_db()
+        self.assertIsNotNone(task.due_at)
+
+    def test_task_handoff_records_assigned_event(self):
+        agent_a = Agent.objects.create(name='Agent A', type='executor', model='claude-3-opus')
+        agent_b = Agent.objects.create(name='Agent B', type='executor', model='claude-3-opus')
+        task = Task.objects.create(
+            title='Task handoff',
+            description='Transferir entre agentes.',
+            status='queue',
+            assigned_to=agent_a,
+        )
+
+        response = self.client.patch(
+            f'/api/v1/tasks/{task.id}/',
+            {'assigned_to': str(agent_b.id)},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        task.refresh_from_db()
+        self.assertEqual(task.assigned_to_id, agent_b.id)
+        self.assertTrue(
+            TaskEvent.objects.filter(task=task, event_type='assigned', message__icontains='Handoff').exists()
+        )
+
+    def test_task_workspace_includes_events_artifacts_and_subtasks(self):
+        agent = Agent.objects.create(
+            name='Executor Workspace',
+            type='executor',
+            model='claude-3-opus',
+        )
+        task = Task.objects.create(
+            title='Mapear nova workspace da tarefa',
+            description='Validar que a tarefa expõe artefatos, eventos e subtarefas.',
+            status='queue',
+            assigned_to=agent,
+        )
+        TaskEvent.objects.create(task=task, agent=agent, event_type='created', message='Tarefa criada')
+        Artifact.objects.create(task=task, agent=agent, title='Relatorio inicial', artifact_type='report', status='available')
+        Subtask.objects.create(task=task, assigned_to=agent, title='Validar serializacao da workspace')
+
+        response = self.client.get(f'/api/v1/tasks/{task.id}/workspace/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data['events']), 1)
+        self.assertEqual(len(response.data['artifacts']), 1)
+        self.assertEqual(len(response.data['subtasks']), 1)
+        self.assertEqual(response.data['artifact_count'], 1)
+        self.assertEqual(response.data['event_count'], 1)
+        self.assertEqual(response.data['subtask_count'], 1)
+
+    def test_request_approval_creates_proposed_decision_record(self):
+        agent = Agent.objects.create(name='Executor Decisao', type='executor', model='claude-3-opus')
+        task = Task.objects.create(title='Requer aprovação', description='Fluxo com decisão formal.', status='queue', assigned_to=agent)
+        artifact = Artifact.objects.create(
+            task=task,
+            agent=agent,
+            title='Diff sensível',
+            artifact_type='diff',
+            status='proposed',
+            relative_path='src/app.ts',
+            content='novo conteudo',
+        )
+
+        response = self.client.post(
+            f'/api/v1/tasks/{task.id}/request_approval/',
+            {'artifact_id': str(artifact.id), 'rationale': 'Mudança com impacto operacional alto'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(DecisionRecord.objects.filter(task=task, approval_request_id=response.data['id'], status='proposed').exists())
+
+    def test_create_manual_decision_record(self):
+        agent = Agent.objects.create(name='Executor Governanca', type='executor', model='claude-3-opus')
+        task = Task.objects.create(title='Registrar decisão', description='Governança da entrega.', status='review', assigned_to=agent)
+
+        response = self.client.post(
+            f'/api/v1/tasks/{task.id}/create_decision/',
+            {
+                'title': 'Seguir rollout controlado',
+                'summary': 'Liberar por etapas para reduzir risco.',
+                'rationale': 'Existem incertezas de carga.',
+                'scope': 'task',
+                'impact': 'high',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(DecisionRecord.objects.filter(task=task, title='Seguir rollout controlado', status='accepted').exists())
+
+    def test_supersede_decision_action_replaces_decision(self):
+        agent = Agent.objects.create(name='Executor Supersede', type='executor', model='claude-3-opus')
+        task = Task.objects.create(title='Substituir decisão', description='Criar cadeia de supersessão.', status='review', assigned_to=agent)
+        initial = DecisionRecord.objects.create(
+            task=task,
+            title='Escolher stack A',
+            summary='Decisão inicial',
+            rationale='Contexto inicial',
+            status='accepted',
+            scope='task',
+            impact='medium',
+            created_by_user=self.user,
+        )
+
+        response = self.client.post(
+            f'/api/v1/tasks/{task.id}/supersede_decision/',
+            {
+                'decision_id': str(initial.id),
+                'replacement_title': 'Escolher stack B',
+                'replacement_summary': 'Nova decisão por restrições',
+                'replacement_rationale': 'Mudança de requisitos',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        initial.refresh_from_db()
+        self.assertEqual(initial.status, 'superseded')
+
+        replacement = DecisionRecord.objects.get(id=response.data['id'])
+        self.assertEqual(replacement.supersedes_id, initial.id)
+        self.assertEqual(replacement.status, 'accepted')
+        self.assertEqual(replacement.title, 'Escolher stack B')
+
+    def test_supersede_decision_action_requires_decision_from_same_task(self):
+        agent = Agent.objects.create(name='Executor Validacao', type='executor', model='claude-3-opus')
+        task = Task.objects.create(title='Task alvo', description='Task alvo para supersede.', status='review', assigned_to=agent)
+        other_task = Task.objects.create(title='Task externa', description='Nao deve permitir decisão externa.', status='review', assigned_to=agent)
+        external_decision = DecisionRecord.objects.create(
+            task=other_task,
+            title='Decisão externa',
+            status='accepted',
+            scope='task',
+            impact='low',
+        )
+
+        response = self.client.post(
+            f'/api/v1/tasks/{task.id}/supersede_decision/',
+            {
+                'decision_id': str(external_decision.id),
+                'replacement_title': 'Nova decisão',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_apply_file_change_moves_task_to_review_when_all_proposals_are_applied(self):
+        agent = Agent.objects.create(
+            name='Executor Aprovação',
+            type='executor',
+            model='claude-3-opus',
+        )
+        task = Task.objects.create(
+            title='Aplicar mudanças propostas',
+            description='Aprovar e aplicar mudanças de arquivo propostas pelo agente.',
+            status='blocked',
+            assigned_to=agent,
+            result={
+                'file_change_plan': [
+                    {
+                        'relative_path': 'src/demo.txt',
+                        'allowed': True,
+                        'reason': 'ok',
+                        'diff': 'demo diff',
+                    }
+                ]
+            },
+            error='Aguardando aprovação de mudanças de arquivo',
+        )
+        Artifact.objects.create(
+            task=task,
+            agent=agent,
+            title='Proposta de mudança: src/demo.txt',
+            artifact_type='diff',
+            status='proposed',
+            relative_path='src/demo.txt',
+            content='conteudo final',
+        )
+
+        approval = ApprovalRequest.objects.create(
+            task=task,
+            artifact=Artifact.objects.get(task=task, relative_path='src/demo.txt'),
+            requested_by_agent=agent,
+            status='approved',
+            rationale='Aplicar mudança validada',
+        )
+
+        response = self.client.post(
+            f'/api/v1/tasks/{task.id}/apply_file_change/',
+            {
+                'relative_path': 'src/demo.txt',
+                'new_content': 'conteudo final',
+                'approved': True,
+                'artifact_id': str(approval.artifact_id),
+                'approval_request_id': str(approval.id),
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        task.refresh_from_db()
+        self.assertEqual(task.status, 'review')
+        self.assertEqual(task.error, '')
+        self.assertEqual(task.result['file_change_plan'][0]['applied'], True)
+        self.assertTrue(Artifact.objects.filter(task=task, artifact_type='diff', status='applied').exists())
+
+    def test_apply_file_change_requires_formal_approval(self):
+        agent = Agent.objects.create(
+            name='Executor Sem Aprovacao',
+            type='executor',
+            model='claude-3-opus',
+        )
+        task = Task.objects.create(
+            title='Tentativa sem aprovacao',
+            description='Nao deve aplicar sem approval_request_id aprovado.',
+            status='blocked',
+            assigned_to=agent,
+        )
+
+        response = self.client.post(
+            f'/api/v1/tasks/{task.id}/apply_file_change/',
+            {
+                'relative_path': 'src/blocked.txt',
+                'new_content': 'conteudo',
+                'approved': True,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('approval_request_id', str(response.data))
+
+    def test_create_manual_subtask(self):
+        agent = Agent.objects.create(
+            name='Executor Manual',
+            type='executor',
+            model='claude-3-opus',
+        )
+        task = Task.objects.create(
+            title='Organizar entregas',
+            description='Criar subtarefa manual via API.',
+            status='queue',
+            assigned_to=agent,
+        )
+
+        response = self.client.post(
+            '/api/v1/subtasks/',
+            {
+                'task': str(task.id),
+                'title': 'Revisar backlog operacional',
+                'description': 'Criada manualmente pelo drawer.',
+                'priority': 'medium',
+                'status': 'queue',
+                'assigned_to': str(agent.id),
+                'source': 'manual',
+                'order': 1,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(Subtask.objects.filter(task=task, title='Revisar backlog operacional', source='manual').exists())
+
+    def test_update_subtask_with_dependencies(self):
+        agent = Agent.objects.create(
+            name='Executor Dependencias',
+            type='executor',
+            model='claude-3-opus',
+        )
+        task = Task.objects.create(
+            title='Atualizar dependencias de subtarefa',
+            description='Validar edição de prioridade e dependencias.',
+            status='queue',
+            assigned_to=agent,
+        )
+        subtask_base = Subtask.objects.create(
+            task=task,
+            title='Base pronta',
+            status='completed',
+            priority='low',
+            assigned_to=agent,
+            source='manual',
+            order=1,
+        )
+        subtask_target = Subtask.objects.create(
+            task=task,
+            title='Integrar dependencias',
+            status='queue',
+            priority='medium',
+            assigned_to=agent,
+            source='manual',
+            order=2,
+        )
+
+        response = self.client.patch(
+            f'/api/v1/subtasks/{subtask_target.id}/',
+            {
+                'priority': 'high',
+                'depends_on_ids': [str(subtask_base.id)],
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        subtask_target.refresh_from_db()
+        self.assertEqual(subtask_target.priority, 'high')
+        self.assertEqual(list(subtask_target.depends_on.values_list('id', flat=True)), [subtask_base.id])
+
+    def test_reject_cyclic_subtask_dependencies(self):
+        agent = Agent.objects.create(
+            name='Executor Ciclos',
+            type='executor',
+            model='claude-3-opus',
+        )
+        task = Task.objects.create(
+            title='Evitar ciclo entre subtarefas',
+            description='Validar proteção anti-ciclo em dependências.',
+            status='queue',
+            assigned_to=agent,
+        )
+        subtask_a = Subtask.objects.create(
+            task=task,
+            title='Subtarefa A',
+            status='queue',
+            priority='medium',
+            assigned_to=agent,
+            source='manual',
+            order=1,
+        )
+        subtask_b = Subtask.objects.create(
+            task=task,
+            title='Subtarefa B',
+            status='queue',
+            priority='medium',
+            assigned_to=agent,
+            source='manual',
+            order=2,
+        )
+        subtask_a.depends_on.add(subtask_b)
+
+        response = self.client.patch(
+            f'/api/v1/subtasks/{subtask_b.id}/',
+            {
+                'depends_on_ids': [str(subtask_a.id)],
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('ciclo', str(response.data).lower())
+
+
+class ExecutionEngineParsingTest(TestCase):
+    def test_extract_subtask_specs(self):
+        raw_text = '''
+### Resultado
+Fluxo principal estruturado.
+
+[SUBTAREFA: Criar modelo de artefato || Persistir anexos por tarefa || high]
+[SUBTAREFA: Expor drawer da tarefa || Mostrar timeline e anexos || medium]
+'''
+
+        items = _extract_subtask_specs(raw_text)
+
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]['title'], 'Criar modelo de artefato')
+        self.assertEqual(items[0]['priority'], 'high')
+        self.assertEqual(items[1]['title'], 'Expor drawer da tarefa')
 
 
 class EpicAPITest(TestCase):

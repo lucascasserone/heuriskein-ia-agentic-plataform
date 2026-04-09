@@ -1,14 +1,12 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Reorder, motion, AnimatePresence } from 'framer-motion';
-import { useAppStore } from '@/store/appStore';
-import { apiClient, MetricsOverview } from '@/lib/api';
+import { apiClient, AgentCapacityItem, MetricsOverview } from '@/lib/api';
 import { LayoutGrid, Zap, CheckCircle2, Clock, AlertCircle, User, Timer, Eye, EyeOff, Pencil, Trash2, Search, X as XIcon, Minimize2, Maximize2, Plus, Code2, Globe, Wrench, ArrowRight, GitBranch } from 'lucide-react';
 import { useNotify } from '@/lib/toast';
-import EditEpicModal from '@/components/Modals/EditEpicModal';
+import EpicMasterView from '@/components/Modals/EpicMasterView';
 import EditTaskModal from '@/components/Modals/EditTaskModal';
-import CreateEpicModal from '@/components/Modals/CreateEpicModal';
 import CreateTaskModal from '@/components/Modals/CreateTaskModal';
 import ConfirmDeleteModal from '@/components/Modals/ConfirmDeleteModal';
 import TaskResultModal from '@/components/Modals/TaskResultModal';
@@ -21,15 +19,22 @@ interface Task {
   description?: string;
   status: 'queue' | 'processing' | 'blocked' | 'review' | 'completed' | 'failed';
   priority: 'low' | 'medium' | 'high';
-  assigned_to?: string;
+  assigned_to?: string | null;
+  assigned_to_name?: string;
   epic?: string | null;
   epic_goal?: string;
   result?: Record<string, unknown> | null;
   error?: string;
   latest_question?: string;
+  summary?: string;
+  next_action?: string;
+  artifact_count?: number;
+  event_count?: number;
+  subtask_count?: number;
   attempt_count?: number;
   started_at?: string;
   completed_at?: string;
+  due_at?: string | null;
   created_at?: string;
 }
 
@@ -43,6 +48,22 @@ interface Epic {
 
 type TaskStatus = Task['status'];
 type EpicStatus = Epic['status'];
+
+function getApiErrorMessage(error: unknown, fallback: string) {
+  if (typeof error === 'object' && error !== null) {
+    const response = 'response' in error ? (error as { response?: { data?: { error?: string; question?: string } } }).response : undefined;
+    return response?.data?.error || fallback;
+  }
+  return fallback;
+}
+
+function getApiErrorQuestion(error: unknown) {
+  if (typeof error === 'object' && error !== null) {
+    const response = 'response' in error ? (error as { response?: { data?: { question?: string } } }).response : undefined;
+    return response?.data?.question || '';
+  }
+  return '';
+}
 
 // Planning Board (Epics) - Blueprint Style
 const planningStatuses = [
@@ -76,6 +97,14 @@ const statusDots = {
   completed: { color: 'bg-blue-400', label: 'Concluído' },
 };
 
+type RoleLane = {
+  key: string;
+  role: string;
+  status: TaskStatus;
+  count: number;
+  owners: string[];
+};
+
 export default function DualKanbanDragDrop() {
   const [epics, setEpics] = useState<{ [key: string]: Epic[] }>({});
   const [tasks, setTasks] = useState<{ [key: string]: Task[] }>({});
@@ -89,6 +118,11 @@ export default function DualKanbanDragDrop() {
   // Search & filter state
   const [searchQuery, setSearchQuery] = useState('');
   const [filterPriority, setFilterPriority] = useState<'all' | 'low' | 'medium' | 'high'>('all');
+  const [filterOwner, setFilterOwner] = useState<'all' | 'unassigned' | string>('all');
+  const [filterBlocker, setFilterBlocker] = useState<'all' | 'blocked' | 'has-error'>('all');
+  const [filterArtifacts, setFilterArtifacts] = useState<'all' | 'with-artifacts' | 'without-artifacts'>('all');
+  const [filterSubtasks, setFilterSubtasks] = useState<'all' | 'with-subtasks' | 'without-subtasks'>('all');
+  const [filterDueState, setFilterDueState] = useState<'all' | 'overdue' | 'due-soon' | 'no-due-date'>('all');
   const [flowEpicStatusFilter, setFlowEpicStatusFilter] = useState<EpicStatus | null>(null);
   const [flowTaskStatusFilter, setFlowTaskStatusFilter] = useState<TaskStatus | null>(null);
 
@@ -104,6 +138,7 @@ export default function DualKanbanDragDrop() {
   const [viewingTask, setViewingTask] = useState<Task | null>(null);
   const [clarifyingTask, setClarifyingTask] = useState<Task | null>(null);
   const [metrics, setMetrics] = useState<MetricsOverview | null>(null);
+  const [agentCapacity, setAgentCapacity] = useState<AgentCapacityItem[]>([]);
   const lastFetchErrorRef = useRef<string | null>(null);
   const taskRealtime = useTaskRealtime();
 
@@ -170,6 +205,20 @@ export default function DualKanbanDragDrop() {
     };
   }, []);
 
+  useEffect(() => {
+    const syncAgentFilter = (event: Event) => {
+      const detail = (event as CustomEvent<{ agentId?: string }>).detail;
+      if (!detail?.agentId) return;
+      setFilterOwner(detail.agentId);
+      setShowFlowGraph(false);
+    };
+
+    window.addEventListener('kanban:filter-agent', syncAgentFilter as EventListener);
+    return () => {
+      window.removeEventListener('kanban:filter-agent', syncAgentFilter as EventListener);
+    };
+  }, []);
+
   // Fast poll (every 4 s) while any task is processing
   useEffect(() => {
     const hasProcessing = Object.values(tasks).flat().some((t) => t.status === 'processing');
@@ -197,10 +246,11 @@ export default function DualKanbanDragDrop() {
   };
 
   const fetchData = async () => {
-    const [epicsRes, tasksRes, metricsRes] = await Promise.allSettled([
+    const [epicsRes, tasksRes, metricsRes, capacityRes] = await Promise.allSettled([
       withTimeout(apiClient.getEpicsByStatus(), 15000),
       withTimeout(apiClient.getTasksByStatus(), 15000),
       withTimeout(apiClient.getMetricsOverview(), 15000),
+      withTimeout(apiClient.getAgentCapacity(), 15000),
     ]);
 
     let hasAnySuccess = false;
@@ -225,6 +275,15 @@ export default function DualKanbanDragDrop() {
       hasAnySuccess = true;
     } else {
       errors.push('metricas');
+    }
+
+    if (capacityRes.status === 'fulfilled') {
+      setAgentCapacity(capacityRes.value.data || []);
+      hasAnySuccess = true;
+    } else {
+      // Capacity panel is optional; keep board functional if this endpoint is temporarily unavailable.
+      setAgentCapacity([]);
+      console.warn('Agent capacity endpoint unavailable');
     }
 
     if (errors.length > 0) {
@@ -295,13 +354,83 @@ export default function DualKanbanDragDrop() {
     setDeletingItem({ item, type });
   };
 
-  // Filter helper
-  const filterItems = <T extends Task | Epic,>(items: T[]): T[] => {
+  const ownerOptions = useMemo(() => {
+    const list = Object.values(tasks)
+      .flat()
+      .map((task) => ({ id: task.assigned_to || '', name: task.assigned_to_name || '' }))
+      .filter((owner) => owner.id && owner.name);
+
+    const unique = new Map<string, string>();
+    list.forEach((owner) => {
+      if (!unique.has(owner.id)) unique.set(owner.id, owner.name);
+    });
+
+    return Array.from(unique.entries()).map(([id, name]) => ({ id, name }));
+  }, [tasks]);
+
+  const isTaskOverdue = (task: Task) => {
+    if (!task.due_at) return false;
+    const due = new Date(task.due_at);
+    if (Number.isNaN(due.getTime())) return false;
+    return due.getTime() < Date.now() && !['completed', 'failed'].includes(task.status);
+  };
+
+  const isTaskDueSoon = (task: Task) => {
+    if (!task.due_at) return false;
+    const due = new Date(task.due_at);
+    if (Number.isNaN(due.getTime())) return false;
+    const delta = due.getTime() - Date.now();
+    return delta > 0 && delta <= 48 * 60 * 60 * 1000;
+  };
+
+  const filterEpicItems = (items: Epic[]): Epic[] => {
     return items.filter((item) => {
-      const text = 'goal' in item ? item.goal : (item as Task).title;
-      const matchesSearch = searchQuery === '' || text.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesSearch = searchQuery === '' || item.goal.toLowerCase().includes(searchQuery.toLowerCase());
       const matchesPriority = filterPriority === 'all' || item.priority === filterPriority;
       return matchesSearch && matchesPriority;
+    });
+  };
+
+  const filterTaskItems = (items: Task[]): Task[] => {
+    return items.filter((item) => {
+      const text = `${item.title} ${item.description || ''} ${item.summary || ''} ${item.next_action || ''}`.toLowerCase();
+      const matchesSearch = searchQuery === '' || text.includes(searchQuery.toLowerCase());
+      const matchesPriority = filterPriority === 'all' || item.priority === filterPriority;
+
+      const matchesOwner =
+        filterOwner === 'all' ||
+        (filterOwner === 'unassigned' ? !item.assigned_to : item.assigned_to === filterOwner);
+
+      const hasError = Boolean(item.error && item.error.trim());
+      const matchesBlocker =
+        filterBlocker === 'all' ||
+        (filterBlocker === 'blocked' ? item.status === 'blocked' : hasError);
+
+      const hasArtifacts = (item.artifact_count || 0) > 0;
+      const matchesArtifacts =
+        filterArtifacts === 'all' ||
+        (filterArtifacts === 'with-artifacts' ? hasArtifacts : !hasArtifacts);
+
+      const hasSubtasks = (item.subtask_count || 0) > 0;
+      const matchesSubtasks =
+        filterSubtasks === 'all' ||
+        (filterSubtasks === 'with-subtasks' ? hasSubtasks : !hasSubtasks);
+
+      const matchesDueState =
+        filterDueState === 'all' ||
+        (filterDueState === 'overdue' && isTaskOverdue(item)) ||
+        (filterDueState === 'due-soon' && isTaskDueSoon(item)) ||
+        (filterDueState === 'no-due-date' && !item.due_at);
+
+      return (
+        matchesSearch &&
+        matchesPriority &&
+        matchesOwner &&
+        matchesBlocker &&
+        matchesArtifacts &&
+        matchesSubtasks &&
+        matchesDueState
+      );
     });
   };
 
@@ -318,17 +447,34 @@ export default function DualKanbanDragDrop() {
       }
       setDeletingItem(null);
       fetchData();
-    } catch (error: any) {
-      const msg = error?.response?.data?.error || 'Erro ao excluir';
+    } catch (error: unknown) {
+      const msg = getApiErrorMessage(error, 'Erro ao excluir');
       notify.error(msg);
     } finally {
       setDeleteLoading(false);
     }
   };
 
-  const handleTaskAction = async (task: Task, action: 'execute' | 'complete' | 'fail' | 'retry' | 'viewResult' | 'clarify') => {
+  const handleTaskAction = async (task: Task, action: 'execute' | 'complete' | 'fail' | 'retry' | 'viewResult' | 'clarify' | 'focusOrg') => {
     if (action === 'viewResult') {
       setViewingTask(task);
+      return;
+    }
+    if (action === 'focusOrg') {
+      if (typeof window !== 'undefined') {
+        const agentId = task.assigned_to || '';
+        if (agentId) {
+          localStorage.setItem('org_focus_agent', agentId);
+        }
+        localStorage.setItem('org_focus_payload', JSON.stringify({
+          taskId: task.id,
+          title: task.title,
+          status: task.status,
+          priority: task.priority,
+          agentId,
+        }));
+        window.location.href = '/organizacao';
+      }
       return;
     }
     if (action === 'clarify') {
@@ -352,10 +498,10 @@ export default function DualKanbanDragDrop() {
       }
 
       await fetchData();
-    } catch (error: any) {
-      const detail = error?.response?.data?.error || 'Não foi possível executar a ação';
+    } catch (error: unknown) {
+      const detail = getApiErrorMessage(error, 'Não foi possível executar a ação');
       notify.error(detail);
-      const question = error?.response?.data?.question;
+      const question = getApiErrorQuestion(error);
       if (question) {
         notify.error(`IA precisa de contexto: ${question}`);
         setClarifyingTask(task);
@@ -421,6 +567,11 @@ export default function DualKanbanDragDrop() {
   const clearAllFilters = () => {
     setSearchQuery('');
     setFilterPriority('all');
+    setFilterOwner('all');
+    setFilterBlocker('all');
+    setFilterArtifacts('all');
+    setFilterSubtasks('all');
+    setFilterDueState('all');
     setFlowEpicStatusFilter(null);
     setFlowTaskStatusFilter(null);
   };
@@ -432,6 +583,39 @@ export default function DualKanbanDragDrop() {
     { key: 'review' as const, label: 'QA', count: (tasks.review || []).length },
     { key: 'completed' as const, label: 'Finalizado', count: (tasks.completed || []).length },
   ];
+
+  const roleHandoffLanes = useMemo<RoleLane[]>(() => {
+    const statuses: Array<{ key: string; role: string; status: TaskStatus }> = [
+      { key: 'planner', role: 'Planner', status: 'queue' },
+      { key: 'executor', role: 'Executor', status: 'processing' },
+      { key: 'reviewer', role: 'Reviewer', status: 'blocked' },
+      { key: 'qa', role: 'QA', status: 'review' },
+      { key: 'done', role: 'Done', status: 'completed' },
+    ];
+
+    return statuses.map((lane) => {
+      const laneTasks = tasks[lane.status] || [];
+      const owners = Array.from(
+        new Set(
+          laneTasks
+            .map((task) => task.assigned_to_name || 'Sem dono')
+            .filter(Boolean)
+        )
+      );
+
+      return {
+        ...lane,
+        count: laneTasks.length,
+        owners,
+      };
+    });
+  }, [tasks]);
+
+  const overloadedAgents = useMemo(() => {
+    return agentCapacity
+      .filter((agent) => agent.load.open_total >= 6 || agent.load.active >= 3)
+      .slice(0, 4);
+  }, [agentCapacity]);
 
   return (
     <>
@@ -453,19 +637,15 @@ export default function DualKanbanDragDrop() {
           notify.success('Esclarecimento enviado. A task voltou para fila.');
         }}
       />
-      <EditEpicModal
-        isOpen={!!editingEpic}
+      <EpicMasterView
+        isOpen={!!editingEpic || isCreateEpicOpen}
         epic={editingEpic}
-        onClose={() => setEditingEpic(null)}
+        onClose={() => {
+          setEditingEpic(null);
+          setIsCreateEpicOpen(false);
+        }}
         onSuccess={() => {
           setEditingEpic(null);
-          fetchData();
-        }}
-      />
-      <CreateEpicModal
-        isOpen={isCreateEpicOpen}
-        onClose={() => setIsCreateEpicOpen(false)}
-        onSuccess={() => {
           setIsCreateEpicOpen(false);
           fetchData();
         }}
@@ -643,8 +823,68 @@ export default function DualKanbanDragDrop() {
               </button>
             </div>
 
+            <div className="ml-1 hidden xl:flex items-center gap-1.5">
+              <select
+                value={filterOwner}
+                onChange={(e) => setFilterOwner(e.target.value)}
+                className="px-2 py-1 rounded-md text-[11px] bg-surface border border-gray-metallic/30 text-gray-light"
+                title="Filtrar por responsável"
+              >
+                <option value="all">Owner: todos</option>
+                <option value="unassigned">Owner: sem dono</option>
+                {ownerOptions.map((owner) => (
+                  <option key={owner.id} value={owner.id}>{owner.name}</option>
+                ))}
+              </select>
+
+              <select
+                value={filterBlocker}
+                onChange={(e) => setFilterBlocker(e.target.value as 'all' | 'blocked' | 'has-error')}
+                className="px-2 py-1 rounded-md text-[11px] bg-surface border border-gray-metallic/30 text-gray-light"
+                title="Filtrar por bloqueios"
+              >
+                <option value="all">Bloqueio: todos</option>
+                <option value="blocked">Status bloqueado</option>
+                <option value="has-error">Com erro</option>
+              </select>
+
+              <select
+                value={filterArtifacts}
+                onChange={(e) => setFilterArtifacts(e.target.value as 'all' | 'with-artifacts' | 'without-artifacts')}
+                className="px-2 py-1 rounded-md text-[11px] bg-surface border border-gray-metallic/30 text-gray-light"
+                title="Filtrar por artefatos"
+              >
+                <option value="all">Artefatos: todos</option>
+                <option value="with-artifacts">Com artefatos</option>
+                <option value="without-artifacts">Sem artefatos</option>
+              </select>
+
+              <select
+                value={filterSubtasks}
+                onChange={(e) => setFilterSubtasks(e.target.value as 'all' | 'with-subtasks' | 'without-subtasks')}
+                className="px-2 py-1 rounded-md text-[11px] bg-surface border border-gray-metallic/30 text-gray-light"
+                title="Filtrar por subtarefas"
+              >
+                <option value="all">Subtarefas: todos</option>
+                <option value="with-subtasks">Com subtarefas</option>
+                <option value="without-subtasks">Sem subtarefas</option>
+              </select>
+
+              <select
+                value={filterDueState}
+                onChange={(e) => setFilterDueState(e.target.value as 'all' | 'overdue' | 'due-soon' | 'no-due-date')}
+                className="px-2 py-1 rounded-md text-[11px] bg-surface border border-gray-metallic/30 text-gray-light"
+                title="Filtrar por prazo"
+              >
+                <option value="all">Prazo: todos</option>
+                <option value="overdue">Atrasado</option>
+                <option value="due-soon">Vence 48h</option>
+                <option value="no-due-date">Sem prazo</option>
+              </select>
+            </div>
+
             {/* Active filter count badge */}
-            {(searchQuery || filterPriority !== 'all' || flowEpicStatusFilter || flowTaskStatusFilter) && (
+            {(searchQuery || filterPriority !== 'all' || filterOwner !== 'all' || filterBlocker !== 'all' || filterArtifacts !== 'all' || filterSubtasks !== 'all' || filterDueState !== 'all' || flowEpicStatusFilter || flowTaskStatusFilter) && (
               <button
                 onClick={clearAllFilters}
                 className="text-xs text-gray-dim hover:text-red-400 transition-colors ml-1"
@@ -698,7 +938,7 @@ export default function DualKanbanDragDrop() {
                 status={key}
                 label={label}
                 icon={icon}
-                items={filterItems(epics[key] || [])}
+                items={filterEpicItems(epics[key] || [])}
                 type="epic"
                 cardStyle="blueprint"
                 onDragEnd={(item) => handleDragEnd(item, key as EpicStatus, 'epic')}
@@ -731,7 +971,7 @@ export default function DualKanbanDragDrop() {
                 status={key}
                 label={label}
                 icon={icon}
-                items={filterItems(tasks[key] || [])}
+                items={filterTaskItems(tasks[key] || [])}
                 type="task"
                 cardStyle="vivo"
                 onDragEnd={(item) => handleDragEnd(item, key as TaskStatus, 'task')}
@@ -804,6 +1044,60 @@ export default function DualKanbanDragDrop() {
               </div>
             </div>
 
+            <div className="grid gap-4 lg:grid-cols-[1.1fr_1.4fr]">
+              <div className="rounded-lg border border-gray-metallic/20 bg-black/25 p-3">
+                <p className="mb-3 text-[10px] font-mono uppercase tracking-[0.18em] text-gray-dim">Capacidade por agente</p>
+                {agentCapacity.length > 0 ? (
+                  <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                    {agentCapacity.slice(0, 6).map((agent) => (
+                      <div key={agent.id} className="rounded-md border border-gray-metallic/20 bg-surface/40 px-3 py-2">
+                        <p className="text-[11px] text-text-title truncate">{agent.name}</p>
+                        <p className="text-[10px] text-gray-light">ativo {agent.load.active} | fila {agent.load.queued}</p>
+                        <p className="text-[10px] text-gray-dim">total {agent.load.open_total}</p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-gray-light">Capacidade indisponível no momento.</p>
+                )}
+              </div>
+
+              <div className="rounded-lg border border-cyan-400/20 bg-cyan-500/5 p-3">
+                <p className="mb-3 text-[10px] font-mono uppercase tracking-[0.18em] text-cyan-200">Handoff por papel</p>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {roleHandoffLanes.map((lane, index) => (
+                    <React.Fragment key={lane.key}>
+                      <div className="min-w-[120px] rounded-md border border-cyan-300/25 bg-black/25 px-3 py-2">
+                        <p className="text-[10px] text-cyan-100">{lane.role}</p>
+                        <p className="text-xs font-semibold text-text-title">{lane.count} tarefas</p>
+                        <p className="text-[10px] text-gray-light truncate" title={lane.owners.join(', ')}>
+                          {lane.owners.slice(0, 2).join(', ') || 'Sem dono'}
+                        </p>
+                      </div>
+                      {index < roleHandoffLanes.length - 1 ? <ArrowRight size={12} className="shrink-0 text-cyan-300/60" /> : null}
+                    </React.Fragment>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-red-400/30 bg-red-500/10 p-3">
+              <p className="mb-3 text-[10px] font-mono uppercase tracking-[0.18em] text-red-200">Alerta de sobrecarga</p>
+              {overloadedAgents.length > 0 ? (
+                <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                  {overloadedAgents.map((agent) => (
+                    <div key={`overload-${agent.id}`} className="rounded-md border border-red-300/30 bg-black/20 px-3 py-2">
+                      <p className="text-[11px] text-text-title truncate">{agent.name}</p>
+                      <p className="text-[10px] text-red-200">ativos {agent.load.active} | fila {agent.load.queued}</p>
+                      <p className="text-[10px] text-red-300/80">total {agent.load.open_total}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-red-100/80">Nenhum agente em sobrecarga no momento.</p>
+              )}
+            </div>
+
             <div className="rounded-lg border border-gray-metallic/30 bg-black/30 p-3">
               <p className="text-xs text-gray-light">
                 Leitura rápida: backlog/refinamento mostram entrada de demanda; fila/processando mostram pressão operacional; concluído/falhou mostram throughput e qualidade.
@@ -831,7 +1125,7 @@ interface ColumnProps {
   cardStyle: 'blueprint' | 'vivo';
   onDragEnd: (item: Task | Epic) => void;
   onStatusChange: (item: Task | Epic, newStatus: TaskStatus | EpicStatus, type: 'task' | 'epic') => Promise<void>;
-  onTaskAction: (task: Task, action: 'execute' | 'complete' | 'fail' | 'retry' | 'viewResult' | 'clarify') => Promise<void>;
+  onTaskAction: (task: Task, action: 'execute' | 'complete' | 'fail' | 'retry' | 'viewResult' | 'clarify' | 'focusOrg') => Promise<void>;
   onEdit: (item: Task | Epic) => void;
   onDelete: (item: Task | Epic) => void;
   compactMode: boolean;
@@ -940,7 +1234,7 @@ interface CardProps {
   status: string;
   cardStyle: 'blueprint' | 'vivo';
   onStatusChange: (item: Task | Epic, newStatus: TaskStatus | EpicStatus, type: 'task' | 'epic') => Promise<void>;
-  onTaskAction: (task: Task, action: 'execute' | 'complete' | 'fail' | 'retry' | 'viewResult' | 'clarify') => Promise<void>;
+  onTaskAction: (task: Task, action: 'execute' | 'complete' | 'fail' | 'retry' | 'viewResult' | 'clarify' | 'focusOrg') => Promise<void>;
   onEdit: (item: Task | Epic) => void;
   onDelete: (item: Task | Epic) => void;
   compactMode: boolean;
@@ -979,6 +1273,12 @@ const DragDropCard = React.memo(function DragDropCard({ item, type, status, card
     const estimate = 0.0009 * complexityFactor * attempts;
     return estimate.toFixed(4);
   }, [taskItem]);
+
+  const taskSummary = taskItem?.summary || (typeof taskItem?.result?.summary === 'string' ? taskItem.result.summary : '');
+  const nextAction = taskItem?.next_action || (typeof taskItem?.result?.next_action === 'string' ? taskItem.result.next_action : '');
+  const dueAtText = taskItem?.due_at
+    ? new Date(taskItem.due_at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+    : '';
 
   const getProgressBar = () => {
     if (type === 'epic') {
@@ -1065,6 +1365,32 @@ const DragDropCard = React.memo(function DragDropCard({ item, type, status, card
         </div>
       )}
 
+      {type === 'task' && taskSummary && (
+        <div className={`${compactMode ? 'mb-1.5' : 'mb-2'} rounded-lg border border-gray-metallic/20 bg-black/25 px-2 py-1.5`}>
+          <p className="text-[10px] font-mono uppercase tracking-[0.18em] text-gray-dim">Resumo</p>
+          <p className={`${compactMode ? 'text-[10px]' : 'text-[11px]'} mt-1 line-clamp-3 text-gray-light`}>{taskSummary}</p>
+        </div>
+      )}
+
+      {type === 'task' && (
+        <div className={`${compactMode ? 'mb-1.5 gap-1' : 'mb-2 gap-1.5'} flex flex-wrap`}>
+          <span className="rounded-md border border-primary/25 bg-primary/10 px-1.5 py-0.5 text-[10px] font-mono text-primary">
+            artefatos {taskItem?.artifact_count || 0}
+          </span>
+          <span className="rounded-md border border-secondary/25 bg-secondary/10 px-1.5 py-0.5 text-[10px] font-mono text-secondary">
+            eventos {taskItem?.event_count || 0}
+          </span>
+          <span className="rounded-md border border-yellow-400/25 bg-yellow-500/10 px-1.5 py-0.5 text-[10px] font-mono text-yellow-300">
+            subtarefas {taskItem?.subtask_count || 0}
+          </span>
+          {dueAtText && (
+            <span className="rounded-md border border-orange-400/25 bg-orange-500/10 px-1.5 py-0.5 text-[10px] font-mono text-orange-300">
+              prazo {dueAtText}
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Tool + Cost hints */}
       {type === 'task' && taskItem && (
         <div className="flex items-center justify-between gap-2 mb-1.5 min-w-0">
@@ -1126,7 +1452,7 @@ const DragDropCard = React.memo(function DragDropCard({ item, type, status, card
             <div className="w-4 lg:w-5 h-4 lg:h-5 rounded-full bg-primary/20 border border-primary/40 flex items-center justify-center">
               <User size={10} className="text-primary lg:w-3 lg:h-3" />
             </div>
-            <span className="text-gray-lighter font-medium text-xs lg:text-sm truncate block max-w-full">{item.assigned_to}</span>
+            <span className="text-gray-lighter font-medium text-xs lg:text-sm truncate block max-w-full">{taskItem?.assigned_to_name || item.assigned_to}</span>
           </div>
         </motion.div>
       )}
@@ -1144,6 +1470,12 @@ const DragDropCard = React.memo(function DragDropCard({ item, type, status, card
         </motion.div>
       )}
 
+      {type === 'task' && nextAction && (
+        <div className="mt-1 rounded border border-secondary/20 bg-secondary/5 px-2 py-1.5 text-[10px] text-secondary/90 line-clamp-2">
+          Proxima ação: {nextAction}
+        </div>
+      )}
+
       {type === 'task' && taskItem?.error && (
         <div className="mt-1 mb-1.5 rounded border border-red-500/30 bg-red-950/30 px-2 py-1 text-[10px] text-red-300/90 line-clamp-2">
           {taskItem.error}
@@ -1156,7 +1488,16 @@ const DragDropCard = React.memo(function DragDropCard({ item, type, status, card
             onClick={() => onTaskAction(item as Task, 'viewResult')}
             className="w-full text-[11px] px-2 py-1 rounded bg-surface/60 border border-gray-metallic/30 text-gray-light hover:text-text-title hover:border-primary/40 transition-colors"
           >
-            Ver trace
+            Abrir workspace
+          </button>
+        )}
+
+        {type === 'task' && (
+          <button
+            onClick={() => onTaskAction(item as Task, 'focusOrg')}
+            className="w-full text-[11px] px-2 py-1 rounded bg-secondary/10 border border-secondary/30 text-secondary hover:bg-secondary/20 transition-colors"
+          >
+            Ver no organograma
           </button>
         )}
 
@@ -1288,8 +1629,18 @@ const DragDropCard = React.memo(function DragDropCard({ item, type, status, card
     </motion.div>
   );
 }, (prevProps, nextProps) => {
-  // Custom comparison: only re-render if item ID or status changes
+  const prevTask = prevProps.item as Partial<Task>;
+  const nextTask = nextProps.item as Partial<Task>;
+
   return prevProps.item.id === nextProps.item.id && 
          prevProps.status === nextProps.status &&
-         prevProps.compactMode === nextProps.compactMode;
+         prevProps.compactMode === nextProps.compactMode &&
+         prevTask.summary === nextTask.summary &&
+         prevTask.next_action === nextTask.next_action &&
+         prevTask.artifact_count === nextTask.artifact_count &&
+         prevTask.event_count === nextTask.event_count &&
+         prevTask.subtask_count === nextTask.subtask_count &&
+         prevTask.assigned_to_name === nextTask.assigned_to_name &&
+         prevTask.error === nextTask.error &&
+         prevTask.result === nextTask.result;
 });

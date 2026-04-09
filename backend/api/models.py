@@ -118,6 +118,7 @@ class Task(models.Model):
     attempt_count = models.IntegerField(default=0)
     result = models.JSONField(null=True, blank=True, help_text="Resultado da execução")
     error = models.TextField(blank=True, help_text="Mensagem de erro se falhou")
+    due_at = models.DateTimeField(null=True, blank=True)
     
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
@@ -132,6 +133,203 @@ class Task(models.Model):
     
     def __str__(self):
         return f"{self.title} ({self.get_status_display()})"
+
+
+class Subtask(models.Model):
+    """Representa trabalho decomposto vinculado a uma tarefa pai."""
+
+    STATUS_CHOICES = Task.STATUS_CHOICES
+    PRIORITY_CHOICES = Task.PRIORITY_CHOICES
+    SOURCE_CHOICES = [
+        ('agent', 'Agente'),
+        ('manual', 'Manual'),
+        ('system', 'Sistema'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name='subtasks')
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='queue')
+    priority = models.CharField(max_length=10, choices=PRIORITY_CHOICES, default='medium')
+    assigned_to = models.ForeignKey(Agent, on_delete=models.SET_NULL, null=True, blank=True, related_name='subtasks')
+    depends_on = models.ManyToManyField('self', symmetrical=False, blank=True, related_name='dependents')
+    source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default='agent')
+    order = models.PositiveIntegerField(default=0)
+    metadata = models.JSONField(default=dict, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['order', 'created_at']
+        verbose_name = 'Subtarefa'
+        verbose_name_plural = 'Subtarefas'
+
+    def __str__(self):
+        return f"{self.title} ({self.get_status_display()})"
+
+
+class Artifact(models.Model):
+    """Entregáveis e anexos produzidos ao longo da execução."""
+
+    ARTIFACT_TYPES = [
+        ('document', 'Documento'),
+        ('diff', 'Diff'),
+        ('report', 'Relatório'),
+        ('decision', 'Decisão'),
+        ('spec', 'Especificação'),
+        ('test_result', 'Resultado de Teste'),
+        ('file_bundle', 'Pacote de Arquivos'),
+        ('snapshot', 'Snapshot'),
+        ('log', 'Log'),
+    ]
+
+    STATUS_CHOICES = [
+        ('proposed', 'Proposto'),
+        ('available', 'Disponível'),
+        ('approved', 'Aprovado'),
+        ('applied', 'Aplicado'),
+        ('archived', 'Arquivado'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    title = models.CharField(max_length=255)
+    artifact_type = models.CharField(max_length=30, choices=ARTIFACT_TYPES)
+    task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name='artifacts', null=True, blank=True)
+    epic = models.ForeignKey(Epic, on_delete=models.CASCADE, related_name='artifacts', null=True, blank=True)
+    agent = models.ForeignKey(Agent, on_delete=models.SET_NULL, null=True, blank=True, related_name='artifacts')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='available')
+    version = models.PositiveIntegerField(default=1)
+    relative_path = models.CharField(max_length=500, blank=True)
+    preview = models.TextField(blank=True)
+    content = models.TextField(blank=True)
+    payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Artefato'
+        verbose_name_plural = 'Artefatos'
+
+    def __str__(self):
+        return f"{self.title} ({self.get_artifact_type_display()})"
+
+
+class TaskEvent(models.Model):
+    """Evento auditável de ciclo de vida da tarefa."""
+
+    EVENT_TYPES = [
+        ('created', 'Criada'),
+        ('assigned', 'Atribuída'),
+        ('started', 'Iniciada'),
+        ('decomposed', 'Decomposta'),
+        ('artifact_added', 'Artefato anexado'),
+        ('blocked', 'Bloqueada'),
+        ('approval_requested', 'Aguardando aprovação'),
+        ('approved', 'Aprovada'),
+        ('completed', 'Concluída'),
+        ('failed', 'Falhou'),
+        ('rolled_back', 'Rollback aplicado'),
+        ('updated', 'Atualizada'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name='events')
+    agent = models.ForeignKey(Agent, on_delete=models.SET_NULL, null=True, blank=True, related_name='task_events')
+    event_type = models.CharField(max_length=30, choices=EVENT_TYPES)
+    message = models.TextField()
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Evento de Tarefa'
+        verbose_name_plural = 'Eventos de Tarefa'
+
+    def __str__(self):
+        return f"{self.task.title}: {self.message[:60]}"
+
+
+class ApprovalRequest(models.Model):
+    """Solicitação formal de aprovação para mudanças sensíveis."""
+
+    STATUS_CHOICES = [
+        ('pending', 'Pendente'),
+        ('approved', 'Aprovada'),
+        ('rejected', 'Rejeitada'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name='approval_requests')
+    artifact = models.ForeignKey(Artifact, on_delete=models.CASCADE, related_name='approval_requests', null=True, blank=True)
+    requested_by_agent = models.ForeignKey(Agent, on_delete=models.SET_NULL, null=True, blank=True, related_name='approval_requests')
+    requested_by_user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='requested_approvals')
+    decided_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='decided_approvals')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    rationale = models.TextField(blank=True)
+    decision_notes = models.TextField(blank=True)
+    requested_at = models.DateTimeField(auto_now_add=True)
+    decided_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-requested_at']
+        verbose_name = 'Solicitação de Aprovação'
+        verbose_name_plural = 'Solicitações de Aprovação'
+
+    def __str__(self):
+        return f"Approval {self.id} ({self.status})"
+
+
+class DecisionRecord(models.Model):
+    """Registro de decisão operacional ou estratégica vinculada ao trabalho."""
+
+    SCOPE_CHOICES = [
+        ('task', 'Task'),
+        ('epic', 'Epic'),
+        ('org', 'Org'),
+    ]
+
+    STATUS_CHOICES = [
+        ('proposed', 'Proposta'),
+        ('accepted', 'Aceita'),
+        ('rejected', 'Rejeitada'),
+        ('superseded', 'Substituída'),
+    ]
+
+    IMPACT_CHOICES = [
+        ('low', 'Baixo'),
+        ('medium', 'Médio'),
+        ('high', 'Alto'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name='decision_records')
+    artifact = models.ForeignKey(Artifact, on_delete=models.SET_NULL, null=True, blank=True, related_name='decision_records')
+    approval_request = models.ForeignKey(ApprovalRequest, on_delete=models.SET_NULL, null=True, blank=True, related_name='decision_records')
+    supersedes = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, related_name='superseded_by')
+    created_by_agent = models.ForeignKey(Agent, on_delete=models.SET_NULL, null=True, blank=True, related_name='decision_records')
+    created_by_user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_decisions')
+    decided_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='decided_records')
+    title = models.CharField(max_length=255)
+    summary = models.TextField(blank=True)
+    rationale = models.TextField(blank=True)
+    scope = models.CharField(max_length=20, choices=SCOPE_CHOICES, default='task')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='proposed')
+    impact = models.CharField(max_length=20, choices=IMPACT_CHOICES, default='medium')
+    created_at = models.DateTimeField(auto_now_add=True)
+    decided_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Registro de Decisão'
+        verbose_name_plural = 'Registros de Decisão'
+
+    def __str__(self):
+        return f"{self.title} ({self.status})"
 
 
 class ThoughtLog(models.Model):
