@@ -1,0 +1,13 @@
+{
+  "name": "heuriskein-ia-agentic-plataform",
+  "private": true,
+  "workspaces": [
+    "frontend"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace frontend",
+    "dev": "npm run dev --workspace frontend",
+    "lint": "npm run lint --workspace frontend",
+    "start": "npm run start --workspace frontend"
+  }
+}
