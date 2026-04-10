@@ -5,6 +5,10 @@ import 'reactflow/dist/style.css';
 export const metadata: Metadata = {
   title: 'Heuriskein IA',
   description: 'Multi-Agentic Web System',
+  icons: {
+    icon: '/favicon.ico',
+    shortcut: '/favicon.ico',
+  },
 };
 
 export default function RootLayout({

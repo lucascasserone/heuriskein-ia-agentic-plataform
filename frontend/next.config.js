@@ -1,4 +1,6 @@
 /** @type {import('next').NextConfig} */
+const isProd = process.env.NODE_ENV === 'production';
+
 const nextConfig = {
   reactStrictMode: true,
   swcMinify: true,
@@ -12,8 +14,16 @@ const nextConfig = {
   },
   allowedDevOrigins: ['localhost', '127.0.0.1', 'localhost:3000', '127.0.0.1:3000'],
   env: {
-    NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8001/api/v1',
-    NEXT_PUBLIC_WS_URL: process.env.NEXT_PUBLIC_WS_URL || 'ws://127.0.0.1:8001/ws',
+    NEXT_PUBLIC_API_URL:
+      process.env.NEXT_PUBLIC_API_URL ||
+      (isProd
+        ? 'https://heuriskein-ia-agentic-plataform.onrender.com/api/v1'
+        : 'http://127.0.0.1:8001/api/v1'),
+    NEXT_PUBLIC_WS_URL:
+      process.env.NEXT_PUBLIC_WS_URL ||
+      (isProd
+        ? 'wss://heuriskein-ia-agentic-plataform.onrender.com/ws'
+        : 'ws://127.0.0.1:8001/ws'),
   },
   headers: async () => {
     return [

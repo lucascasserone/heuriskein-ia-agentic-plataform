@@ -1,5 +1,17 @@
 import { useEffect, useRef, useCallback, useState, useMemo } from 'react';
 
+function wsBaseFromApiUrl(apiUrl?: string) {
+  if (!apiUrl) return '';
+  try {
+    const parsed = new URL(apiUrl);
+    const wsScheme = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsPath = parsed.pathname.startsWith('/api') ? '/ws' : parsed.pathname;
+    return `${wsScheme}//${parsed.host}${wsPath}`.replace(/\/$/, '');
+  } catch {
+    return '';
+  }
+}
+
 function resolveWsBaseUrls() {
   const candidates: string[] = [];
 
@@ -12,16 +24,27 @@ function resolveWsBaseUrls() {
 
   if (typeof window !== 'undefined') {
     const hostname = window.location.hostname;
+    const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+
     if (hostname === 'localhost' || hostname === '127.0.0.1') {
-      const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
       // Prefer :8001, then fallback to :8000 for local dev setups.
       pushUnique(`${wsScheme}://${hostname}:8001/ws`);
       pushUnique(`${wsScheme}://${hostname}:8000/ws`);
+    } else {
+      // Allow same-host websocket in reverse proxy setups.
+      pushUnique(`${wsScheme}://${window.location.host}/ws`);
     }
   }
 
   pushUnique(process.env.NEXT_PUBLIC_WS_URL);
-  pushUnique('ws://localhost:8001/ws');
+  pushUnique(wsBaseFromApiUrl(process.env.NEXT_PUBLIC_API_URL));
+
+  if (typeof window !== 'undefined') {
+    const hostname = window.location.hostname;
+    if (hostname === 'localhost' || hostname === '127.0.0.1') {
+      pushUnique('ws://localhost:8001/ws');
+    }
+  }
 
   return candidates;
 }
