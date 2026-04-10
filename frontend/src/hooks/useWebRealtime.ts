@@ -24,15 +24,12 @@ function resolveWsBaseUrls() {
 
   if (typeof window !== 'undefined') {
     const hostname = window.location.hostname;
-    const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
 
     if (hostname === 'localhost' || hostname === '127.0.0.1') {
+      const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
       // Prefer :8001, then fallback to :8000 for local dev setups.
       pushUnique(`${wsScheme}://${hostname}:8001/ws`);
       pushUnique(`${wsScheme}://${hostname}:8000/ws`);
-    } else {
-      // Allow same-host websocket in reverse proxy setups.
-      pushUnique(`${wsScheme}://${window.location.host}/ws`);
     }
   }
 

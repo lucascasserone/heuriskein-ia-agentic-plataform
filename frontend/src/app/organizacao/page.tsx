@@ -70,6 +70,7 @@ export default function OrganizacaoAutonomaPage() {
   const [showAdvancedMissionFields, setShowAdvancedMissionFields] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [focusSourceLabel, setFocusSourceLabel] = useState('');
+  const [missionError, setMissionError] = useState<string | null>(null);
 
   const stats = useMemo(() => {
     const tasks = Object.values(state.task_tree || {});
@@ -214,6 +215,7 @@ export default function OrganizacaoAutonomaPage() {
 
   const runMission = async () => {
     setLoading(true);
+    setMissionError(null);
     try {
       const response = await apiClient.runOrgMission({
         mission_brief: missionBrief,
@@ -226,6 +228,12 @@ export default function OrganizacaoAutonomaPage() {
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('kanban:refresh'));
       }
+    } catch (error: unknown) {
+      const message =
+        error && typeof error === 'object' && 'message' in error
+          ? String((error as { message?: unknown }).message || '')
+          : '';
+      setMissionError(message || 'Falha ao executar missão no backend. Tente novamente em alguns instantes.');
     } finally {
       setLoading(false);
     }
@@ -430,6 +438,12 @@ export default function OrganizacaoAutonomaPage() {
                   {loadingViability ? 'Analisando...' : 'Viabilidade'}
                 </button>
               </div>
+
+              {missionError ? (
+                <div className="rounded-md border border-red-500/35 bg-red-500/10 p-2 text-xs text-red-200">
+                  {missionError}
+                </div>
+              ) : null}
 
               {viability ? (
                 <div className="rounded-md border border-primary/25 bg-dark/35 p-2 text-[11px] space-y-1">

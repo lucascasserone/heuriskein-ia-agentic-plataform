@@ -11,9 +11,6 @@ class TaskConsumer(AsyncWebsocketConsumer):
     
     async def connect(self):
         self.user = self.scope["user"]
-        if not self.user.is_authenticated and not settings.DEBUG:
-            await self.close()
-            return
         
         self.room_group_name = 'tasks_updates'
         
@@ -37,6 +34,13 @@ class TaskConsumer(AsyncWebsocketConsumer):
         try:
             data = json.loads(text_data)
             message_type = data.get('type')
+
+            if not self.user.is_authenticated and message_type in {'task_update'}:
+                await self.send(text_data=json.dumps({
+                    'type': 'error',
+                    'message': 'Authentication required for task updates.'
+                }))
+                return
             
             if message_type == 'task_update':
                 await self.handle_task_update(data)
@@ -129,9 +133,6 @@ class AgentConsumer(AsyncWebsocketConsumer):
     
     async def connect(self):
         self.user = self.scope["user"]
-        if not self.user.is_authenticated and not settings.DEBUG:
-            await self.close()
-            return
         
         self.room_group_name = 'agents_updates'
         
@@ -161,6 +162,13 @@ class AgentConsumer(AsyncWebsocketConsumer):
             data = json.loads(text_data)
             
             if data.get('type') == 'agent_status_update':
+                if not self.user.is_authenticated:
+                    await self.send(text_data=json.dumps({
+                        'type': 'error',
+                        'message': 'Authentication required for agent status updates.'
+                    }))
+                    return
+
                 agent_id = data.get('agent_id')
                 new_state = data.get('state')
                 
@@ -214,9 +222,6 @@ class ThoughtLogConsumer(AsyncWebsocketConsumer):
     
     async def connect(self):
         self.user = self.scope["user"]
-        if not self.user.is_authenticated and not settings.DEBUG:
-            await self.close()
-            return
         
         self.room_group_name = 'thought_logs'
         
@@ -271,9 +276,6 @@ class EpicUpdateConsumer(AsyncWebsocketConsumer):
     
     async def connect(self):
         self.user = self.scope["user"]
-        if not self.user.is_authenticated and not settings.DEBUG:
-            await self.close()
-            return
         
         self.room_group_name = 'epics_updates'
         
@@ -303,6 +305,13 @@ class EpicUpdateConsumer(AsyncWebsocketConsumer):
             data = json.loads(text_data)
             
             if data.get('type') == 'epic_update':
+                if not self.user.is_authenticated:
+                    await self.send(text_data=json.dumps({
+                        'type': 'error',
+                        'message': 'Authentication required for epic updates.'
+                    }))
+                    return
+
                 epic_id = data.get('epic_id')
                 update_data = data.get('data', {})
                 
