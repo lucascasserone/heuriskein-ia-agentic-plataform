@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -51,6 +52,8 @@ TaskStatus = Literal["queued", "in_progress", "awaiting_approval", "approved", "
 
 ORG_MISSION_MARKER = "[ORG_MISSION_ID:{mission_id}]"
 ORG_TASK_MARKER = "[ORG_TASK_ID:{task_id}]"
+
+logger = logging.getLogger(__name__)
 
 
 class TaskNode(TypedDict):
@@ -1040,18 +1043,27 @@ class AutonomousOrganizationService:
         result = self.graph.invoke(state)
         _compute_kpis(result)
         result["agent_profiles"] = _extract_agent_profiles(result)
-        _sync_org_state_to_kanban(result)
+
+        try:
+            _sync_org_state_to_kanban(result)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Org mission sync to Kanban failed")
+            result["execution_trace"].append(f"[{_utc_now()}] Aviso: falha ao sincronizar missão no Kanban ({exc}).")
+
         self.last_state = result
 
-        self.memory.store_experience(
-            mission_text=mission_brief,
-            summary=result.get("final_report") or "Missao executada pela Organizacao Autonoma.",
-            metadata={
-                "mission_id": mission_id,
-                "completed_tasks": len(result.get("completed_tasks") or []),
-                "timestamp": _utc_now(),
-            },
-        )
+        try:
+            self.memory.store_experience(
+                mission_text=mission_brief,
+                summary=result.get("final_report") or "Missao executada pela Organizacao Autonoma.",
+                metadata={
+                    "mission_id": mission_id,
+                    "completed_tasks": len(result.get("completed_tasks") or []),
+                    "timestamp": _utc_now(),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Org mission memory store failed")
 
         return result
 
@@ -1110,11 +1122,62 @@ class OrgMissionAPIView(APIView):
     def post(self, request):
         serializer = OrgMissionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        state = ORG_SERVICE.run_mission(
-            mission_brief=serializer.validated_data["mission_brief"],
-            constraints=serializer.validated_data.get("constraints") or [],
-        )
-        return Response({"state": state}, status=status.HTTP_200_OK)
+        mission_brief = serializer.validated_data["mission_brief"]
+        constraints = serializer.validated_data.get("constraints") or []
+
+        try:
+            state = ORG_SERVICE.run_mission(
+                mission_brief=mission_brief,
+                constraints=constraints,
+            )
+            return Response({"state": state}, status=status.HTTP_200_OK)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Org mission execution failed")
+            mission_id = str(uuid.uuid4())
+            root_id = str(uuid.uuid4())
+            fallback_state: CompanyState = {
+                "mission_id": mission_id,
+                "mission_brief": mission_brief,
+                "mission_constraints": constraints,
+                "corporate_memory_hits": [],
+                "task_tree": {
+                    root_id: {
+                        "id": root_id,
+                        "parent_id": None,
+                        "title": "Missao Corporativa",
+                        "objective": mission_brief,
+                        "level": "ceo",
+                        "agent_id": "",
+                        "status": "rejected",
+                        "complexity": _complexity_from_brief(mission_brief),
+                        "dependencies": [],
+                        "children": [],
+                        "approval_notes": f"Falha na execução da missão: {exc}",
+                        "execution_logs": [f"{_utc_now()} - Falha capturada no backend: {exc}"],
+                    }
+                },
+                "root_task_id": root_id,
+                "active_task_id": root_id,
+                "active_agent_id": "",
+                "pending_queue": [],
+                "awaiting_approval_queue": [],
+                "rejected_queue": [root_id],
+                "completed_tasks": [],
+                "final_report": "Falha ao executar a missão no backend. Verifique configuração de provedores LLM e logs do serviço.",
+                "execution_trace": [f"[{_utc_now()}] Missão falhou: {exc}"],
+                "estimated_tokens": 0,
+                "avg_resolution_minutes": 0.0,
+                "delegation_events": 0,
+                "agent_profiles": {},
+            }
+            return Response(
+                {
+                    "state": fallback_state,
+                    "warning": "mission_execution_failed",
+                    "detail": str(exc),
+                },
+                status=status.HTTP_200_OK,
+            )
 
 
 class OrgStateAPIView(APIView):
