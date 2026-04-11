@@ -1,413 +1,268 @@
-# 🤖 Heuriskein IA - Multi-Agentic Web System
+# Heuriskein IA Agentic Platform
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.13%2B-blue)](https://www.python.org/)
-[![Django](https://img.shields.io/badge/django-6.0.3-darkgreen)](https://www.djangoproject.com/)
-[![Next.js](https://img.shields.io/badge/next.js-14.2-black)](https://nextjs.org/)
-[![GitHub](https://img.shields.io/badge/github-published-brightgreen)](https://github.com/lucascasserone/heuriskein-ia-agentic-plataform)
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/)
+[![Django](https://img.shields.io/badge/django-4.2.11-darkgreen)](https://www.djangoproject.com/)
+[![Next.js](https://img.shields.io/badge/next.js-14-black)](https://nextjs.org/)
+[![Vercel](https://img.shields.io/badge/frontend-vercel-black)](https://heuriskein-ia-agentic-plataform.vercel.app)
+[![GitHub](https://img.shields.io/badge/github-main-brightgreen)](https://github.com/lucascasserone/heuriskein-ia-agentic-plataform)
 
-**Plataforma inteligente de orquestração que gerencia múltiplos agentes de IA para executar tarefas complexas.**
+Plataforma de operação agentic com frontend executivo em Next.js e backend Django para orquestração de agentes, execução de tarefas, memória corporativa, workflows e colaboração em tempo real.
 
-**Status**: 🚀 MVP Ready (v0.1.0)  
-**Data**: Março 30, 2026  
-**Testes**: ✅ 3/4 passing (75%)
+## Visão Geral
 
----
+O projeto organiza trabalho operacional e estratégico em uma interface única com:
 
-## 🎯 Sobre o Projeto
+- Mission Control para hierarquia organizacional e delegação entre agentes.
+- Kanban de execução com tarefas, épicos e status em tempo real.
+- Chat contextual com injeção de contexto de task, epic, playbook e registros corporativos.
+- Playbooks executáveis para operações recorrentes.
+- Corporate Records com documentos, memória corporativa e contexto semântico para LLM.
+- Analytics operacionais com métricas e acompanhamento diário.
+- Configuração de agentes, modelos e credenciais de provedores LLM.
 
-Heuriskein é uma plataforma end-to-end para orquestração de agentes de IA com:
-- 🤖 **Multi-Agent Orchestration** usando LangGraph
-- 💬 **Integração LLM** (Claude + GPT-4)
-- ⚡ **WebSocket Real-time** para atualizações instantâneas
-- 📊 **Dual Kanban Board** (Planejamento + Execução)
-- 🎨 **Modern UI** com Next.js + Tailwind
-- 🔐 **JWT Authentication** segura
-- 🐳 **Docker Ready** para prod/dev
+## Módulos da Interface
 
----
+### Dashboard
 
-## 🚀 Quick Start
+Painel executivo com indicadores principais da operação:
 
-### Pré-requisitos
-- Python 3.13+
-- Node.js 18+
-- Git
+- Taxa de sucesso, fila atual, idade da fila e agentes ativos.
+- Aprovações pendentes, documentos ativos e runs de workflow.
+- Tarefas e épicos por status.
+- Atalhos operacionais para execução, analytics, records, playbooks e chat.
 
-### Instalação Local (5 min)
+### Execução
 
-```bash
-# Clone
-git clone https://github.com/lucascasserone/heuriskein-ia-agentic-plataform.git
-cd heuriskein-ia-agentic-plataform
+Workspace operacional com:
 
-# Backend
-cd backend
-python -m venv venv
-source venv/bin/activate  # ou: venv\Scripts\activate (Windows)
-pip install -r requirements.txt
-python manage.py migrate
-python manage.py runserver 0.0.0.0:8001
+- Dual Kanban para épicos e tarefas.
+- Drag-and-drop de status.
+- Chat lateral recolhível.
+- Sinais de indisponibilidade do backend.
+- Recuperação de chunks/assets em falhas de dev server.
 
-# Frontend (novo terminal)
-cd frontend
-npm install
-npm run dev
+### Organização
 
-# Se veio .env.local da Vercel, ajuste para ambiente local:
-# NEXT_PUBLIC_API_URL=http://127.0.0.1:8001/api/v1
-# NEXT_PUBLIC_WS_URL=ws://127.0.0.1:8001/ws
-```
+Mission Control da estrutura organizacional:
 
-**Acesse:**
-- Frontend: http://localhost:3000
-- Backend: http://localhost:8001/api/v1
-- Admin: http://localhost:8001/admin
+- Visualização hierárquica de CEO, diretores, heads e analistas.
+- Execução de missões com análise de viabilidade.
+- Contratação e edição de agentes.
+- Tráfego node-to-node e feed de execução.
+- Micro-chat por tarefa e cadeia de delegação.
 
----
+### Chat
 
-## 🛠️ Stack Tecnológico
+Interface de conversa com contexto injetável via query string:
 
-### Backend (Django)
-- **Framework**: Django REST Framework 3.14
-- **Real-time**: Django Channels + WebSocket
-- **Agents**: LangGraph para orquestração
-- **LLMs**: Anthropic Claude + OpenAI
-- **Database**: PostgreSQL / SQLite
-- **Cache**: Redis
-- **Async**: Celery
+- `q`, `area`, `initiative`, `task_id`, `epic_id`, `playbook_id`, `playbook`.
+- Uso como hub para continuidade operacional a partir de outras telas.
 
-### Frontend (Next.js)
-- **Framework**: Next.js 14 + React 18
-- **Language**: TypeScript
-- **Styling**: Tailwind CSS
-- **Components**: React Beautiful DnD
-- **State**: Zustand
-- **Icons**: Lucide React
-- **Daphne + Gunicorn** - Servidores ASGI/WSGI
+### Playbooks
+
+Laboratório de chains para workflows recorrentes:
+
+- Biblioteca de playbooks.
+- Editor com preview visual em grafo.
+- Execução de playbooks por escopo.
+- Deploy de contexto para abrir sessão no chat com resumo do payload.
+- Histórico de runs recentes.
+
+### Records
+
+Cérebro corporativo da plataforma:
+
+- Grafo visual de contexto em React Flow.
+- Documentos corporativos e memória reutilizável.
+- Prompt preparation drawer com seleção semântica.
+- Upload e indexação de anexos.
+- Geração de bloco Markdown otimizado para LLM.
+
+### Analytics
+
+Painel analítico com:
+
+- KPIs operacionais.
+- Distribuição por status.
+- Qualidade operacional.
+- Série diária de execução por período.
+
+### Configurações
+
+Centro de administração de interface e agentes:
+
+- Preferências persistidas da UI.
+- Gestão de chaves de API.
+- Edição de agentes e seleção de provedor/modelo.
+
+## Arquitetura
 
 ### Frontend
-- **Next.js 14** - React framework
-- **TypeScript** - Type-safe code
-- **Tailwind CSS** - Styling
-- **Zustand** - State management
-- **Axios** - HTTP client
-- **WebSocket API** - Real-time updates
 
-### DevOps
-- **Docker** + **Docker Compose** - Containerização
-- **PostgreSQL 15** - Database container
-- **Redis 7** - Cache container
+- Next.js 14
+- React 18
+- TypeScript
+- Tailwind CSS
+- Zustand
+- Axios
+- React Flow
+- Lucide React
 
----
+### Backend Setup
 
-## 🚀 Quick Start
+- Django 4.2.11
+- Django REST Framework
+- Django Channels + Daphne
+- Simple JWT
+- LangGraph / LangChain
+- Anthropic e OpenAI
+- Redis / Celery preparados para expansão
+- PostgreSQL ou SQLite
+
+## Estrutura do Repositório
+
+```text
+heuriskein-ia-agentic-plataform/
+├── backend/
+│   ├── api/
+│   ├── heuriskein/
+│   ├── manage.py
+│   └── requirements.txt
+├── frontend/
+│   ├── src/
+│   │   ├── app/
+│   │   ├── components/
+│   │   ├── hooks/
+│   │   ├── lib/
+│   │   └── store/
+│   └── package.json
+├── docs/
+├── docker-compose.yml
+├── render.yaml
+└── README.md
+```
+
+## Setup Local
 
 ### Pré-requisitos
-- Docker & Docker Compose
-- Git
 
-### Setup (5 minutos)
-
-```bash
-# Clone o repositório
-git clone <repo-url>
-cd heuriskein-ia-agentic-plataform
-
-# Copy .env
-cp .env.example .env
-# Edit .env with your API keys
-
-# Inicie os serviços
-docker-compose up -d
-
-# Criar superuser
-docker-compose exec backend python manage.py createsuperuser
-
-# ✅ Frontend: http://localhost:8000
-# ✅ Backend API: http://localhost:8001/api/v1/
-# ✅ Admin: http://localhost:8001/admin/
-```
-
----
-
-## 📁 Estrutura do Projeto
-
-```
-heuriskein-ia-agentic-plataform/
-├── backend/                 # Django API
-│   ├── heuriskein/         # Project config
-│   ├── api/                # Main app
-│   │   ├── models.py       # Agent, Task, Epic, ThoughtLog
-│   │   ├── views.py        # API endpoints
-│   │   ├── consumers.py    # WebSocket handlers
-│   │   └── admin.py        # Django admin
-│   ├── requirements.txt
-│   └── Dockerfile
-│
-├── frontend/               # Next.js app
-│   ├── src/
-│   │   ├── app/            # Pages & layout
-│   │   ├── components/     # React components
-│   │   ├── lib/            # API & WebSocket clients
-│   │   └── store/          # Zustand store
-│   ├── package.json
-│   └── Dockerfile
-│
-├── docker-compose.yml      # Orchestration
-├── .env.example           # Configuration template
-├── PROJECT_SUMMARY.md     # Full requirements
-└── DEVELOPMENT.md         # Development guide
-```
-
----
-
-## 🎯 Funcionalidades Principais
-
-### 1️⃣ Kanban Board Duplo
-- **Planejamento Estratégico** (Épicos)
-  - Estados: Backlog → Refinement → Approved → Completed/Failed
-  - Drag-and-drop entre colunas
-  - Rastreamento de tarefas por épico
-
-- **Execução Operacional** (Tarefas)
-  - Estados: Queue → Processing → Review → Completed/Failed
-  - Alocação automática de agentes
-  - Histórico de tentativas e erros
-
-### 2️⃣ Orquestração de Agentes
-- Criação e configuração de agentes
-- Suporte para tipos: Coordinator, Executor, Analyst
-- Modelo LLM selecionável (Claude, GPT-4, etc)
-- Capacidades customizáveis
-- Status em tempo real: idle, thinking, executing, blocked
-
-### 3️⃣ Chat em Tempo Real
-- Mensagens com agentes selecionados
-- Histórico completo de conversas
-- Contexto automático (tarefas, épicos)
-- Respostas en tempo real via WebSocket
-
-### 4️⃣ Painel de Agentes
-- Lista de agentes ativos
-- Indicadores visuais de estado
-- Capacidades listadas
-- Click para selecionar para chat
-
-### 5️⃣ Console de Logs
-- Logs de pensamento em tempo real
-- Filtros por nível (info, debug, warning, error)
-- Filtros por agente
-- Últimos 500 logs em memória
-- Timestamps precisos
-
----
-
-## 🔌 API Endpoints
-
-### Agents
-```
-GET    /api/v1/agents/                - List agents
-POST   /api/v1/agents/                - Create agent
-GET    /api/v1/agents/{id}/           - Get agent details
-PATCH  /api/v1/agents/{id}/           - Update agent
-DELETE /api/v1/agents/{id}/           - Delete agent
-POST   /api/v1/agents/{id}/update_state/ - Update state
-GET    /api/v1/agents/active/         - Active agents only
-```
-
-### Tasks
-```
-GET    /api/v1/tasks/                 - List tasks
-POST   /api/v1/tasks/                 - Create task
-GET    /api/v1/tasks/{id}/            - Get task details
-PATCH  /api/v1/tasks/{id}/            - Update task
-DELETE /api/v1/tasks/{id}/            - Delete task
-POST   /api/v1/tasks/{id}/execute/    - Execute task
-POST   /api/v1/tasks/{id}/complete/   - Mark complete
-POST   /api/v1/tasks/{id}/fail/       - Mark failed
-GET    /api/v1/tasks/by_status/       - Grouped by status
-```
-
-### Epics
-```
-GET    /api/v1/epics/                 - List epics
-POST   /api/v1/epics/                 - Create epic
-GET    /api/v1/epics/{id}/            - Get epic details
-PATCH  /api/v1/epics/{id}/            - Update epic
-DELETE /api/v1/epics/{id}/            - Delete epic
-GET    /api/v1/epics/{id}/tasks/      - Get epic's tasks
-GET    /api/v1/epics/by_status/       - Grouped by status
-```
-
-### Other
-```
-POST   /api/v1/chat/                  - Send message to agent
-GET    /api/v1/health/                - Health check
-```
-
----
-
-## 🔄 Data Models
-
-### Agent
-```json
-{
-  "id": "uuid",
-  "name": "string",
-  "type": "coordinator|executor|analyst",
-  "state": "idle|thinking|executing|blocked",
-  "model": "claude-3-opus|gpt-4",
-  "capabilities": ["string"],
-  "current_task": "uuid|null"
-}
-```
-
-### Task
-```json
-{
-  "id": "uuid",
-  "title": "string",
-  "description": "string",
-  "epic": "uuid|null",
-  "status": "queue|processing|review|completed|failed",
-  "priority": "low|medium|high",
-  "assigned_to": "uuid|null",
-  "attempt_count": "integer",
-  "result": "object|null",
-  "error": "string|empty"
-}
-```
-
-### Epic
-```json
-{
-  "id": "uuid",
-  "goal": "string",
-  "description": "string",
-  "status": "backlog|refinement|approved|completed|failed",
-  "priority": "low|medium|high",
-  "created_by": "uuid"
-}
-```
-
----
-
-## 🧠 How It Works
-
-```
-User (Browser)
-    ↓
-Frontend (Next.js)
-    ├→ REST API  →  Backend (Django)  →  Database (PostgreSQL)
-    ├→ WebSocket →  Backend (Channels) → Redis
-    └→ Chat UI        ↓
-                  LangGraph Agents Orchestration
-                        ↓
-                  LLM (Claude/GPT-4)
-                        ↓
-                  Tool Execution
-```
-
----
-
-## 🏃 Running Locally (sem Docker)
+- Python 3.12+
+- Node.js 18+
+- npm
 
 ### Backend
-```bash
+
+```powershell
 cd backend
-python -m venv venv
-source venv/bin/activate
+..\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-
-# Setup database (PostgreSQL required)
 python manage.py migrate
-python manage.py createsuperuser
-python manage.py runserver
-
-# In another terminal: Celery
-celery -A heuriskein worker -l info
+python manage.py runserver 127.0.0.1:8001
 ```
 
-### Frontend
-```bash
+### Frontend Setup
+
+```powershell
 cd frontend
 npm install
-npm run dev
-# Open http://localhost:3000
+npm run dev -- -p 3000
 ```
 
----
+### Acessos locais
 
-## 📚 Documentation
+- Frontend: [http://127.0.0.1:3000](http://127.0.0.1:3000)
+- API: [http://127.0.0.1:8001/api/v1](http://127.0.0.1:8001/api/v1)
+- Admin Django: [http://127.0.0.1:8001/admin](http://127.0.0.1:8001/admin)
 
-- [Backend Setup & API Reference](./backend/README.md)
-- [Frontend Components Guide](./frontend/README.md)
-- [Development Guide](./DEVELOPMENT.md)
-- [Full Project Requirements](./PROJECT_SUMMARY.md)
+## Variáveis Importantes
 
----
+### Frontend Variables
 
-## 🗺️ Roadmap
+- `NEXT_PUBLIC_API_URL`
+- `NEXT_PUBLIC_WS_URL`
 
-### ✅ Done (v0.1.0)
-- [x] Project structure
-- [x] Backend models & API
-- [x] Frontend UI components
-- [x] Docker setup
-- [x] WebSocket foundation
+Em ambiente local, a resolução padrão já usa `127.0.0.1:8001` quando o frontend roda em `localhost` ou `127.0.0.1`.
 
-### 📌 In Progress
-- [ ] LLM integration (LangGraph + Claude/OpenAI)
-- [ ] Real-time WebSocket updates
-- [ ] Agent execution engine
-- [ ] Authentication & authorization
+### Backend Variables
 
-### 🔜 Planned
-- [ ] Kanban drag-and-drop
-- [ ] UI for creating epics/tasks
-- [ ] Advanced filtering & search
-- [ ] Dashboard with metrics
-- [ ] Execution history & analytics
-- [ ] Multi-tenancy support
-- [ ] Tool marketplace
-- [ ] Custom agent fine-tuning
+- `DJANGO_SECRET_KEY`
+- `DEBUG`
+- `ALLOWED_HOSTS`
+- `CORS_ALLOWED_ORIGINS`
+- `DATABASE_URL`
+- `REDIS_URL`
+- `ANTHROPIC_API_KEY`
+- `OPENAI_API_KEY`
 
----
+## Principais Capacidades de Backend
 
-## 🤝 Contributing
+- CRUD de agentes, tasks e épicos.
+- Execução de tasks com engine de prompt e contexto corporativo.
+- Chat com auto-contexto e acionamento de playbooks.
+- Workflow playbooks e workflow runs.
+- Documentos corporativos e memória corporativa.
+- WebSockets para tasks, agentes, épicos e logs.
+- Servir arquivos em `MEDIA` durante desenvolvimento.
 
-1. Create a feature branch: `git checkout -b feature/my-feature`
-2. Commit changes: `git commit -am 'Add my feature'`
-3. Push to branch: `git push origin feature/my-feature`
-4. Open a Pull Request
+## Build e Validação
 
----
+### Frontend Build
 
-## 📄 License
+```powershell
+npm --prefix frontend run build
+```
 
-MIT License - See LICENSE file
+### Backend Check
 
----
+```powershell
+cd backend
+..\.venv\Scripts\Activate.ps1
+python manage.py check
+```
 
-## 👤 Author
+## Deploy
 
-**Marco Baldassari**
-- 📧 Email: marco.baldassari@example.com
-- 🐙 GitHub: [@marco-dev](https://github.com/marco-dev)
+### Frontend Deploy
 
----
+- Hospedado no Vercel.
+- Alias de produção atual: [https://heuriskein-ia-agentic-plataform.vercel.app](https://heuriskein-ia-agentic-plataform.vercel.app)
 
-## 🆘 Support
+Deploy manual via CLI:
 
-For issues and questions:
-1. Check [DEVELOPMENT.md](./DEVELOPMENT.md) for troubleshooting
-2. Review [PROJECT_SUMMARY.md](./PROJECT_SUMMARY.md) for detailed specs
-3. Check existing issues on GitHub
-4. Create a new issue with detailed description
+```powershell
+& "C:\Users\Marco Lucas\AppData\Roaming\npm\vercel.cmd" --prod --yes
+```
 
----
+### Backend Deploy
 
-**Last Updated**: March 29, 2026  
-**Version**: 0.1.0  
-**Status**: 🚀 Active Development
+- Preparado para Render.
+- `render.yaml` presente no repositório.
+- Sempre que houver mudança de backend ou migrations, o backend deve ser redeployado e as migrations aplicadas no ambiente remoto.
+
+## Fluxo de Publicação
+
+```powershell
+git add <arquivos>
+git commit -m "docs: update readme"
+git push origin main
+& "C:\Users\Marco Lucas\AppData\Roaming\npm\vercel.cmd" --prod --yes
+```
+
+Depois disso, se houve alteração no backend, force o redeploy no Render.
+
+## Estado Atual do Produto
+
+Hoje o projeto já contempla:
+
+- Frontend multiaba cobrindo dashboard, execução, organização, chat, playbooks, records, analytics e configurações.
+- Recuperação de falhas de assets em ambiente de desenvolvimento.
+- Headers `Cache-Control: no-store` no frontend em dev para evitar chunks antigos.
+- Injeção de contexto corporativo no execution engine.
+- Media serving em desenvolvimento para anexos dos Records.
+- Links profundos entre Organização, Chat, Playbooks e Records.
+- Suporte a credenciais por provedor LLM e edição de agentes.
+
+## Observações
+
+- O repositório pode conter arquivos locais não versionados como ambientes virtuais, mídia e artefatos temporários; eles não fazem parte do deploy.
+- Para mudanças de esquema, confira as migrations em `backend/api/migrations/` antes do redeploy do backend.
