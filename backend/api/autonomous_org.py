@@ -33,6 +33,7 @@ except ImportError:
 
 from api.models import Agent, Epic, Task
 from api.llm_service import get_llm_service
+from api.work_tracking import create_agent_handoff
 
 try:
     import psycopg2
@@ -704,6 +705,7 @@ def _append_trace(state: CompanyState, message: str) -> None:
 def _create_child_task(state: CompanyState, parent_id: str, level: HierarchyLevel) -> str:
     parent = state["task_tree"][parent_id]
     child_id = str(uuid.uuid4())
+    child_agent_id = _pick_agent_for_level(level)
     child_complexity = max(2, parent["complexity"] - 2)
     child_task: TaskNode = {
         "id": child_id,
@@ -711,7 +713,7 @@ def _create_child_task(state: CompanyState, parent_id: str, level: HierarchyLeve
         "title": f"Subtask de {parent['title']}",
         "objective": parent["objective"],
         "level": level,
-        "agent_id": _pick_agent_for_level(level),
+        "agent_id": child_agent_id,
         "status": "queued",
         "complexity": child_complexity,
         "dependencies": [parent_id],
@@ -723,6 +725,31 @@ def _create_child_task(state: CompanyState, parent_id: str, level: HierarchyLeve
     state["task_tree"][parent_id]["children"].append(child_id)
     state["pending_queue"].append(child_id)
     _append_trace(state, f"Delegacao: {parent['level']} -> {level} ({child_id})")
+
+    parent_agent = Agent.objects.filter(id=parent["agent_id"]).first()
+    child_agent = Agent.objects.filter(id=child_agent_id).first()
+    create_agent_handoff(
+        from_agent=parent_agent,
+        to_agent=child_agent,
+        message_type='delegate',
+        subject=f"Delegação organizacional: {parent['title']}",
+        body=(
+            f"Delegação de {parent['level']} para {level}.\n\n"
+            f"Objetivo: {parent['objective']}\n"
+            f"Nova frente: {child_task['title']}\n"
+            f"Complexidade estimada: {child_complexity}"
+        ),
+        payload={
+            'source': 'autonomous_org',
+            'org_parent_task_id': parent_id,
+            'org_child_task_id': child_id,
+            'from_level': parent['level'],
+            'to_level': level,
+            'mission_id': state['mission_id'],
+        },
+        trace_id=state['mission_id'],
+        correlation_id=parent_id,
+    )
     return child_id
 
 

@@ -318,6 +318,77 @@ class TaskAPITest(TestCase):
         self.assertEqual(task.result['file_change_plan'][0]['applied'], True)
         self.assertTrue(Artifact.objects.filter(task=task, artifact_type='diff', status='applied').exists())
 
+
+class EpicExtendedFieldsAPITest(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username='epic-user', password='test123')
+        self.client.force_authenticate(user=self.user)
+
+    def test_create_and_update_epic_persists_extended_fields(self):
+        create_payload = {
+            'goal': 'Melhorar governanca operacional',
+            'description': 'Criar fluxo estruturado de validacao e aprovacao.',
+            'priority': 'high',
+            'status': 'backlog',
+            'complexity': 5,
+            'lead_time': '2026-04-30',
+            'checklist_items': [
+                {
+                    'text': 'Mapear critérios de aceite',
+                    'agent_ready': True,
+                    'critical': True,
+                    'requires_validation': False,
+                }
+            ],
+            'context_files': [
+                {
+                    'name': 'brief.md',
+                    'size': 321,
+                    'type': 'text/markdown',
+                }
+            ],
+            'feedback': [
+                {
+                    'text': 'Escopo validado pelo time',
+                    'time': '10:30',
+                }
+            ],
+        }
+
+        create_response = self.client.post('/api/v1/epics/', create_payload, format='json')
+        self.assertEqual(create_response.status_code, 201)
+
+        epic_id = create_response.data['id']
+        epic = Epic.objects.get(id=epic_id)
+        self.assertEqual(epic.complexity, 5)
+        self.assertEqual(str(epic.lead_time), '2026-04-30')
+        self.assertEqual(epic.checklist_items[0]['text'], 'Mapear critérios de aceite')
+        self.assertEqual(epic.context_files[0]['name'], 'brief.md')
+        self.assertEqual(epic.feedback[0]['text'], 'Escopo validado pelo time')
+
+        update_payload = {
+            'complexity': 8,
+            'due_date': '2026-05-03',
+            'checklist_items': [
+                {
+                    'text': 'Executar validação final',
+                    'agent_ready': True,
+                    'critical': True,
+                    'requires_validation': True,
+                }
+            ],
+        }
+
+        update_response = self.client.patch(f'/api/v1/epics/{epic_id}/', update_payload, format='json')
+        self.assertEqual(update_response.status_code, 200)
+
+        epic.refresh_from_db()
+        self.assertEqual(epic.complexity, 8)
+        self.assertEqual(str(epic.lead_time), '2026-05-03')
+        self.assertEqual(epic.checklist_items[0]['text'], 'Executar validação final')
+        self.assertEqual(epic.checklist_items[0]['requires_validation'], True)
+
     def test_apply_file_change_requires_formal_approval(self):
         agent = Agent.objects.create(
             name='Executor Sem Aprovacao',

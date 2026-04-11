@@ -1,10 +1,13 @@
 'use client';
 
 import { FormEvent, useEffect, useMemo, useState } from 'react';
-import { Play, Send, Sparkles, UserPlus, X } from 'lucide-react';
+import Link from 'next/link';
+import { ArrowRightLeft, Pencil, Play, Send, Settings, Sparkles, Trash2, Users, UserPlus, X } from 'lucide-react';
 import LayoutPremium from '@/components/Layout/LayoutPremium';
 import LiveOrgChart from '@/components/Organization/LiveOrgChart';
-import { CompanyStateResponse, apiClient } from '@/lib/api';
+import AgentEditModal from '@/components/Modals/AgentEditModal';
+import ApiKeysModal from '@/components/Modals/ApiKeysModal';
+import { AgentItem, AgentMessageItem, CompanyStateResponse, apiClient } from '@/lib/api';
 
 const EMPTY_STATE: CompanyStateResponse = {
   mission_id: '',
@@ -34,7 +37,7 @@ interface ViabilityResult {
   complexity: number;
 }
 
-interface AgentMessage {
+interface AgentChatMessage {
   role: 'user' | 'agent';
   content: string;
   timestamp: string;
@@ -65,12 +68,21 @@ export default function OrganizacaoAutonomaPage() {
   const [hireLevel, setHireLevel] = useState<'ceo' | 'director' | 'head' | 'analyst'>('head');
   const [hireCapabilities, setHireCapabilities] = useState('growth,analytics,performance-media');
   const [hireBio, setHireBio] = useState('');
-  const [chatHistoryByTaskId, setChatHistoryByTaskId] = useState<Record<string, AgentMessage[]>>({});
+  const [chatHistoryByTaskId, setChatHistoryByTaskId] = useState<Record<string, AgentChatMessage[]>>({});
   const [showFactoryDrawer, setShowFactoryDrawer] = useState(false);
   const [showAdvancedMissionFields, setShowAdvancedMissionFields] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [focusSourceLabel, setFocusSourceLabel] = useState('');
   const [missionError, setMissionError] = useState<string | null>(null);
+
+  // Team / agent editing
+  const [dbAgents, setDbAgents] = useState<AgentItem[]>([]);
+  const [editingAgent, setEditingAgent] = useState<AgentItem | null>(null);
+  const [showApiKeysModal, setShowApiKeysModal] = useState(false);
+  const [deletingAgentId, setDeletingAgentId] = useState<string | null>(null);
+  const [trafficAgentId, setTrafficAgentId] = useState<string>('');
+  const [agentTraffic, setAgentTraffic] = useState<AgentMessageItem[]>([]);
+  const [trafficLoading, setTrafficLoading] = useState(false);
 
   const stats = useMemo(() => {
     const tasks = Object.values(state.task_tree || {});
@@ -120,6 +132,11 @@ export default function OrganizacaoAutonomaPage() {
     return chatHistoryByTaskId[selectedTaskId] || [];
   }, [selectedTaskId, chatHistoryByTaskId]);
 
+  const trafficAgent = useMemo(() => {
+    if (!trafficAgentId) return null;
+    return dbAgents.find((agent) => agent.id === trafficAgentId) || null;
+  }, [dbAgents, trafficAgentId]);
+
   const [microMessage, setMicroMessage] = useState('');
   const [sendingMicroMessage, setSendingMicroMessage] = useState(false);
 
@@ -134,9 +151,106 @@ export default function OrganizacaoAutonomaPage() {
     }
   };
 
+  const loadDbAgents = async () => {
+    try {
+      const res = await apiClient.getAgents();
+      const list = (res.data as any)?.results || res.data || [];
+      setDbAgents(Array.isArray(list) ? list : []);
+    } catch {
+      // ignore
+    }
+  };
+
   useEffect(() => {
     loadLatest();
+    loadDbAgents();
   }, []);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      loadDbAgents();
+    }, 15000);
+
+    const onFocus = () => loadDbAgents();
+    window.addEventListener('focus', onFocus);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!dbAgents.length) {
+      setTrafficAgentId('');
+      return;
+    }
+
+    setTrafficAgentId((current) => {
+      if (current && dbAgents.some((agent) => agent.id === current)) {
+        return current;
+      }
+      if (selectedTask?.agent_id && dbAgents.some((agent) => agent.id === selectedTask.agent_id)) {
+        return selectedTask.agent_id;
+      }
+      return dbAgents[0].id;
+    });
+  }, [dbAgents, selectedTask]);
+
+  useEffect(() => {
+    if (!trafficAgentId) {
+      setAgentTraffic([]);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadTraffic = async () => {
+      setTrafficLoading(true);
+      try {
+        const [inboxRes, outboxRes] = await Promise.all([
+          apiClient.getAgentInbox(trafficAgentId),
+          apiClient.getAgentOutbox(trafficAgentId),
+        ]);
+
+        if (cancelled) return;
+
+        const merged = [...(inboxRes.data || []), ...(outboxRes.data || [])]
+          .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
+          .slice(0, 12);
+
+        setAgentTraffic(merged);
+      } catch {
+        if (!cancelled) {
+          setAgentTraffic([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setTrafficLoading(false);
+        }
+      }
+    };
+
+    loadTraffic();
+    const intervalId = window.setInterval(loadTraffic, 15000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [trafficAgentId]);
+
+  const formatTrafficTimestamp = (value: string) => {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString('pt-BR', {
+      day: '2-digit',
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  };
 
   useEffect(() => {
     const applyFocusByAgent = (agentId: string) => {
@@ -326,6 +440,24 @@ export default function OrganizacaoAutonomaPage() {
     }
   };
 
+  const deleteAgent = async (agent: AgentItem) => {
+    const ok = window.confirm(`Excluir o agente "${agent.name}"? Esta ação não pode ser desfeita.`);
+    if (!ok) return;
+
+    setDeletingAgentId(agent.id);
+    try {
+      await apiClient.deleteAgent(agent.id);
+      if (editingAgent?.id === agent.id) {
+        setEditingAgent(null);
+      }
+      await loadDbAgents();
+    } catch {
+      window.alert('Falha ao excluir agente. Tente novamente.');
+    } finally {
+      setDeletingAgentId(null);
+    }
+  };
+
   const handleSendFromSidebar = async (e: FormEvent) => {
     e.preventDefault();
     if (!selectedTask || !microMessage.trim() || sendingMicroMessage) return;
@@ -389,8 +521,8 @@ export default function OrganizacaoAutonomaPage() {
         </div>
 
         <div className="grid grid-cols-1 xl:grid-cols-12 gap-3">
-          <aside className="xl:col-span-3 space-y-3">
-            <section className="rounded-xl border border-gray-metallic/25 bg-surface/40 p-3 space-y-3">
+          <aside className={selectedTask ? 'xl:col-span-4 space-y-3' : 'xl:col-span-6 space-y-3'}>
+            <section className="rounded-xl border border-primary/20 bg-gradient-to-br from-primary/10 via-surface/40 to-cyan-500/5 p-4 space-y-3 shadow-[0_0_20px_rgba(14,165,233,0.08)]">
               <div className="flex items-center justify-between">
                 <h2 className="text-sm font-semibold text-text-title">Qual o desafio de hoje?</h2>
                 <Sparkles size={14} className="text-primary" />
@@ -398,7 +530,7 @@ export default function OrganizacaoAutonomaPage() {
               <textarea
                 value={missionBrief}
                 onChange={(e) => setMissionBrief(e.target.value)}
-                className="w-full h-16 rounded-md bg-darker border border-gray-metallic/35 px-3 py-2 text-sm text-text-default"
+                className="w-full h-20 rounded-md bg-darker border border-gray-metallic/35 px-3 py-2 text-sm text-text-default"
                 placeholder="Descreva a missao principal"
               />
 
@@ -467,9 +599,148 @@ export default function OrganizacaoAutonomaPage() {
                 )}
               </div>
             </section>
+
+            {/* Team section */}
+            <section className="rounded-xl border border-cyan-400/20 bg-gradient-to-br from-cyan-500/10 via-surface/50 to-transparent p-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Users size={13} className="text-primary" />
+                  <h3 className="text-sm font-semibold text-text-title">Team Builder</h3>
+                  <span className="rounded border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">{dbAgents.length} agentes</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setShowFactoryDrawer(true)}
+                    className="flex items-center gap-1 rounded-md border border-emerald-400/35 bg-emerald-500/10 px-2 py-1 text-[10px] text-emerald-200 hover:bg-emerald-500/20 transition-colors"
+                    title="Abrir Agent Factory"
+                  >
+                    <UserPlus size={11} />
+                    Montar time
+                  </button>
+                  <button
+                    onClick={() => setShowApiKeysModal(true)}
+                    className="rounded-md border border-gray-metallic/30 bg-surface/50 p-1.5 text-gray-light hover:text-text-title transition-colors"
+                    title="Gerenciar chaves de API"
+                    aria-label="Gerenciar chaves de API"
+                  >
+                    <Settings size={12} />
+                  </button>
+                </div>
+              </div>
+              <p className="text-[11px] text-gray-light">
+                Defina a composição ideal de agentes por papel, modelo e especialidade para acelerar a execução.
+              </p>
+              {dbAgents.length === 0 ? (
+                <p className="text-xs text-gray-light">Nenhum agente cadastrado.</p>
+              ) : (
+                <div className="space-y-1.5 max-h-[320px] overflow-auto pr-1">
+                  {dbAgents.map((agent) => (
+                    <div
+                      key={agent.id}
+                      className="flex items-center justify-between gap-2 rounded-lg border border-white/10 bg-black/30 px-3 py-2"
+                    >
+                      <div className="min-w-0">
+                        <p className="text-xs font-medium text-text-title truncate">{agent.name}</p>
+                        <p className="text-[10px] text-gray-400 truncate">
+                          {agent.organization || 'Geral'} · {agent.llm_provider || 'anthropic'}
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-1">
+                        <button
+                          onClick={() => setEditingAgent(agent)}
+                          className="rounded-md border border-primary/30 bg-primary/10 p-1.5 text-primary hover:bg-primary/20 transition-colors"
+                          title="Editar agente"
+                          aria-label="Editar agente"
+                        >
+                          <Pencil size={11} />
+                        </button>
+                        <button
+                          onClick={() => deleteAgent(agent)}
+                          disabled={deletingAgentId === agent.id}
+                          className="rounded-md border border-red-500/35 bg-red-500/10 p-1.5 text-red-300 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+                          title={deletingAgentId === agent.id ? 'Excluindo agente...' : 'Excluir agente'}
+                          aria-label={deletingAgentId === agent.id ? 'Excluindo agente' : 'Excluir agente'}
+                        >
+                          <Trash2 size={11} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section className="rounded-xl border border-violet-400/20 bg-gradient-to-br from-violet-500/10 via-surface/50 to-transparent p-3 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <ArrowRightLeft size={13} className="text-violet-300" />
+                  <h3 className="text-sm font-semibold text-text-title">Tráfego node-to-node</h3>
+                </div>
+                {trafficAgent ? (
+                  <span className="rounded border border-violet-400/30 bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-200">
+                    {trafficAgent.name}
+                  </span>
+                ) : null}
+              </div>
+
+              {dbAgents.length > 0 ? (
+                <select
+                  value={trafficAgentId}
+                  onChange={(e) => setTrafficAgentId(e.target.value)}
+                  className="w-full rounded-md bg-darker border border-gray-metallic/35 px-3 py-2 text-xs text-text-default"
+                >
+                  {dbAgents.map((agent) => (
+                    <option key={`traffic-agent-${agent.id}`} value={agent.id}>
+                      {agent.name}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
+
+              <div className="space-y-2 max-h-[300px] overflow-auto pr-1">
+                {trafficLoading ? (
+                  <p className="text-xs text-gray-light">Carregando tráfego recente...</p>
+                ) : agentTraffic.length === 0 ? (
+                  <p className="text-xs text-gray-light">Nenhuma mensagem recente para este agente.</p>
+                ) : (
+                  agentTraffic.map((message) => {
+                    const outbound = message.from_agent === trafficAgentId;
+                    return (
+                      <div
+                        key={message.id}
+                        className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 space-y-1"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] uppercase tracking-wide text-violet-200">
+                            {message.message_type}
+                          </span>
+                          <span className="text-[10px] text-gray-500">{formatTrafficTimestamp(message.created_at)}</span>
+                        </div>
+                        <p className="text-xs font-medium text-text-title line-clamp-2">
+                          {message.subject || 'Mensagem sem assunto'}
+                        </p>
+                        <p className="text-[11px] text-gray-light line-clamp-3">
+                          {message.body || 'Sem corpo adicional.'}
+                        </p>
+                        <div className="flex items-center justify-between gap-2 text-[10px] text-gray-400">
+                          <span>
+                            {outbound ? `Saída para ${message.to_agent_name || 'destino'}` : `Entrada de ${message.from_agent_name || 'origem'}`}
+                          </span>
+                          <span className="uppercase">{message.status}</span>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </section>
           </aside>
 
-          <section className={selectedTask ? 'xl:col-span-6' : 'xl:col-span-9'}>
+          <section className={selectedTask ? 'xl:col-span-5' : 'xl:col-span-6'}>
+            <div className="mb-2 flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-text-title">Organograma vivo</h3>
+              <span className="text-[11px] text-gray-light">Estrutura em tempo real</span>
+            </div>
             <LiveOrgChart
               taskTree={state.task_tree}
               rootTaskId={state.root_task_id}
@@ -507,6 +778,14 @@ export default function OrganizacaoAutonomaPage() {
                 <p className="font-semibold mb-1">Contexto de delegacao</p>
                 <p>Head responsável: {selectedTaskDelegation?.head?.title || 'Nao identificado'}</p>
                 <p className="mt-1">Origem imediata: {selectedTaskDelegation?.parent?.title || 'Raiz da missão'}</p>
+                <div className="mt-2">
+                  <Link
+                    href={`/chat?q=${encodeURIComponent(`Continuar execução da task ${selectedTask.title}`)}&task_id=${encodeURIComponent(selectedTask.id)}&initiative=${encodeURIComponent(selectedTask.title)}`}
+                    className="inline-flex rounded-md border border-cyan-300/40 bg-cyan-500/15 px-2.5 py-1.5 text-[11px] text-cyan-100 hover:bg-cyan-500/25"
+                  >
+                    Continuar no chat
+                  </Link>
+                </div>
               </div>
 
               <div className="space-y-2">
@@ -641,6 +920,20 @@ export default function OrganizacaoAutonomaPage() {
           </div>
         </div>
       ) : null}
+
+      {/* Agent edit drawer */}
+      <AgentEditModal
+        agent={editingAgent}
+        isOpen={editingAgent !== null}
+        onClose={() => setEditingAgent(null)}
+        onSaved={() => { loadDbAgents(); setEditingAgent(null); }}
+      />
+
+      {/* API keys modal */}
+      <ApiKeysModal
+        isOpen={showApiKeysModal}
+        onClose={() => setShowApiKeysModal(false)}
+      />
     </LayoutPremium>
   );
 }

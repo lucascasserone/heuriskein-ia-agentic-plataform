@@ -7,10 +7,11 @@ Designed to run in a background thread (non-blocking).
 import threading
 import re
 from django.utils import timezone
+from django.db.models import Q
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from api.file_sandbox import SandboxPolicy, create_snapshot, preview_file_change, task_workspace
-from api.work_tracking import create_artifact, create_subtask, record_task_event
+from api.work_tracking import create_agent_handoff, create_artifact, create_subtask, record_task_event
 
 
 # ──────────────────────────────────────────────────────────────
@@ -19,8 +20,19 @@ from api.work_tracking import create_artifact, create_subtask, record_task_event
 
 def build_system_prompt(agent) -> str:
     caps = ", ".join(agent.capabilities) if agent.capabilities else "general"
+    org = getattr(agent, 'organization', '') or 'Geral'
+    role_prompt = (getattr(agent, 'role_prompt', '') or '').strip()
+    context = (getattr(agent, 'context', '') or '').strip()
+    model_info = f"{getattr(agent, 'llm_provider', 'anthropic')}:{getattr(agent, 'llm_model', agent.model)}"
+
+    extra = ""
+    if role_prompt:
+        extra += f"\n\n### Função/Prompt\n{role_prompt}"
+    if context:
+        extra += f"\n\n### Contexto\n{context}"
+
     return f"""Você é {agent.name}, um agente de IA especializado do sistema Heuriskein.
-Tipo: {agent.type} | Capacidades: {caps} | Modelo: {agent.model}
+Organização: {org} | Tipo: {agent.type} | Capacidades: {caps} | Modelo: {model_info}
 
 Seu papel é executar tarefas de forma autônoma, clara e objetiva.
 Para cada tarefa você deve:
@@ -30,10 +42,89 @@ Para cada tarefa você deve:
 4. Identificar próximos passos e dependências
 
 Sempre responda em português do Brasil.
-Seja direto, técnico e orientado a resultados."""
+Seja direto, técnico e orientado a resultados.{extra}"""
 
 
-def build_task_prompt(task) -> str:
+def _trim_prompt_block(value: str, limit: int = 2000) -> str:
+    cleaned = (value or '').strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit].rstrip() + '...'
+
+
+def _build_corporate_prompt_context_for_task(task, top_k: int = 3) -> str:
+    """Build a compact corporate knowledge block to ground autonomous execution."""
+    try:
+        from api.models import CorporateDocument, CorporateMemoryEntry
+
+        area = ''
+        initiative = ''
+        if getattr(task, 'epic', None):
+            area = (getattr(task.epic, 'area', '') or '').strip()
+            initiative = (getattr(task.epic, 'goal', '') or '').strip()
+
+        query = ' '.join(
+            part for part in [
+                (getattr(task, 'title', '') or '').strip(),
+                (getattr(task, 'description', '') or '').strip(),
+                area,
+                initiative,
+            ] if part
+        )
+
+        docs_qs = CorporateDocument.objects.filter(status='active')
+        mem_qs = CorporateMemoryEntry.objects.all()
+
+        if area:
+            docs_qs = docs_qs.filter(Q(area__icontains=area) | Q(area=''))
+            mem_qs = mem_qs.filter(Q(area__icontains=area) | Q(area=''))
+
+        if initiative:
+            docs_qs = docs_qs.filter(Q(initiative__icontains=initiative) | Q(initiative=''))
+            mem_qs = mem_qs.filter(Q(initiative__icontains=initiative) | Q(initiative=''))
+
+        if query:
+            docs_qs = docs_qs.filter(
+                Q(title__icontains=query) |
+                Q(summary__icontains=query) |
+                Q(content__icontains=query)
+            )
+            mem_qs = mem_qs.filter(
+                Q(title__icontains=query) |
+                Q(summary__icontains=query) |
+                Q(content__icontains=query)
+            )
+
+        docs = list(docs_qs.order_by('-updated_at')[:top_k])
+        entries = list(mem_qs.order_by('-times_reused', '-updated_at')[:top_k])
+
+        if not docs and not entries:
+            return ''
+
+        lines = ['### Base de Conhecimento Corporativa']
+        if docs:
+            lines.append('Documentos relevantes:')
+            for doc in docs:
+                lines.append(
+                    f"- [{doc.doc_type}] {doc.title}"
+                    f" (area: {doc.area or '-'}, iniciativa: {doc.initiative or '-'})"
+                    f" -> {_trim_prompt_block((doc.summary or doc.content or ''), limit=360)}"
+                )
+        if entries:
+            lines.append('Memórias reutilizáveis:')
+            for entry in entries:
+                lines.append(
+                    f"- [{entry.source_type}] {entry.title}"
+                    f" (reuso: {entry.times_reused}x)"
+                    f" -> {_trim_prompt_block((entry.summary or entry.content or ''), limit=320)}"
+                )
+
+        return '\n'.join(lines)
+    except Exception:
+        return ''
+
+
+def build_task_prompt(task, corporate_prompt_context: str = '') -> str:
     epic_ctx = ""
     if task.epic:
         epic_ctx = f"""
@@ -57,6 +148,13 @@ Use explicitamente esse esclarecimento para orientar a execução.
     except Exception:
         clarification_ctx = ""
 
+    corporate_ctx = ""
+    if corporate_prompt_context:
+        corporate_ctx = f"""
+## Contexto Corporativo
+{corporate_prompt_context}
+"""
+
     workspace = task_workspace(str(task.id))
     policy = SandboxPolicy()
 
@@ -68,6 +166,7 @@ Use explicitamente esse esclarecimento para orientar a execução.
 **Tentativa:** #{task.attempt_count}
 {epic_ctx}
 {clarification_ctx}
+{corporate_ctx}
 
 ## Instruções
 Execute esta tarefa completamente. Estruture sua resposta com as seções abaixo.
@@ -228,7 +327,11 @@ def _run_task(task_id: str):
     system_prompt = build_system_prompt(agent) if agent else (
         "Você é um agente executor do sistema Heuriskein. Responda em português."
     )
-    user_prompt = build_task_prompt(task)
+    corporate_prompt_context = _build_corporate_prompt_context_for_task(task, top_k=3)
+    if corporate_prompt_context:
+        _log(agent, task, "📚 Contexto corporativo injetado na execução da tarefa.")
+
+    user_prompt = build_task_prompt(task, corporate_prompt_context=corporate_prompt_context)
 
     # ── Mark agent as executing ─────────────────────────────
     if agent:
@@ -240,10 +343,17 @@ def _run_task(task_id: str):
     _log(agent, task, "⚙️ Enviando tarefa para Claude...")
 
     try:
-        response_text = llm.chat(
-            messages=[{"role": "user", "content": user_prompt}],
-            system=system_prompt,
-        )
+        if agent:
+            response_text = llm.chat_for_agent(
+                agent,
+                messages=[{"role": "user", "content": user_prompt}],
+                system=system_prompt,
+            )
+        else:
+            response_text = llm.chat(
+                messages=[{"role": "user", "content": user_prompt}],
+                system=system_prompt,
+            )
     except Exception as e:
         _fail_task(task, agent, f"Erro na chamada LLM: {str(e)}")
         return
@@ -356,7 +466,7 @@ def _create_subtasks_from_result(task, subtask_specs: list[dict], agent=None) ->
     created = 0
     for order, spec in enumerate(subtask_specs, start=1):
         try:
-            create_subtask(
+            subtask = create_subtask(
                 task=task,
                 title=spec['title'],
                 description=spec.get('description', ''),
@@ -365,6 +475,31 @@ def _create_subtasks_from_result(task, subtask_specs: list[dict], agent=None) ->
                 source='agent',
                 order=order,
             )
+            handoff = create_agent_handoff(
+                from_agent=task.assigned_to,
+                to_agent=subtask.assigned_to,
+                task=task,
+                message_type='delegate',
+                subject=f'Subtarefa automatizada: {subtask.title}',
+                body=(
+                    f'O agente executor decompôs a tarefa em uma nova subtarefa: {subtask.title}.\n\n'
+                    f'Descrição: {subtask.description or "Sem descrição adicional."}'
+                ),
+                payload={
+                    'source': 'execution_engine',
+                    'subtask_id': str(subtask.id),
+                    'subtask_title': subtask.title,
+                    'priority': subtask.priority,
+                },
+            )
+            if handoff:
+                record_task_event(
+                    task,
+                    'updated',
+                    f'Mensagem node-to-node criada para a subtarefa automatizada {subtask.title}',
+                    agent=task.assigned_to,
+                    metadata={'subtask_id': str(subtask.id), 'agent_message_id': str(handoff.id)},
+                )
             created += 1
         except Exception:
             pass

@@ -16,11 +16,78 @@ function resolveApiBaseUrl() {
 
 const API_BASE_URL = resolveApiBaseUrl();
 
+export function getResolvedApiBaseUrl() {
+  return API_BASE_URL;
+}
+
+export function getResolvedWsBaseUrl() {
+  if (typeof window !== 'undefined') {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const hostname = window.location.hostname;
+    if (hostname === 'localhost' || hostname === '127.0.0.1') {
+      return `${protocol}//${hostname}:8001/ws`;
+    }
+  }
+
+  const configured = process.env.NEXT_PUBLIC_WS_URL;
+  if (configured) {
+    return configured.replace(/\/$/, '');
+  }
+
+  try {
+    const parsed = new URL(API_BASE_URL);
+    const wsProtocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${wsProtocol}//${parsed.host}/ws`;
+  } catch {
+    return '';
+  }
+}
+
+export function isBackendUnavailableError(error: unknown) {
+  if (!error || typeof error !== 'object') return false;
+
+  const maybeAxios = error as {
+    code?: string;
+    message?: string;
+    response?: { status?: number };
+    request?: unknown;
+  };
+
+  if (maybeAxios.response?.status) {
+    return false;
+  }
+
+  if (maybeAxios.code === 'ERR_NETWORK' || maybeAxios.code === 'ECONNABORTED') {
+    return true;
+  }
+
+  const message = String(maybeAxios.message || '').toLowerCase();
+  return message.includes('network error') || message.includes('timeout') || message.includes('failed to fetch');
+}
+
 export interface EpicPayload {
   goal: string;
   description?: string;
   priority?: 'low' | 'medium' | 'high';
   status?: 'backlog' | 'refinement' | 'approved' | 'completed' | 'failed';
+  checklist_items?: Array<{
+    text: string;
+    agent_ready?: boolean;
+    critical?: boolean;
+    requires_validation?: boolean;
+  }>;
+  complexity?: number | null;
+  lead_time?: string | null;
+  due_date?: string | null;
+  context_files?: Array<{
+    name: string;
+    size?: number;
+    type?: string;
+  }>;
+  feedback?: Array<{
+    text: string;
+    time?: string;
+  }>;
 }
 
 export interface TaskPayload {
@@ -39,6 +106,170 @@ export interface AgentSummary {
   name: string;
   type: 'coordinator' | 'executor' | 'analyst';
   state: 'idle' | 'thinking' | 'executing' | 'blocked' | 'error';
+}
+
+export interface AgentItem extends AgentSummary {
+  organization?: string;
+  model: string;
+  llm_provider?: 'anthropic' | 'openai' | 'xai' | 'google';
+  llm_model?: string;
+  llm_version?: string;
+  role_prompt?: string;
+  context?: string;
+  capabilities: string[];
+  api_key_configured?: boolean;
+}
+
+export interface AgentProviderOption {
+  id: 'anthropic' | 'openai' | 'xai' | 'google';
+  label: string;
+  models: string[];
+}
+
+export interface ProviderCredentialStatus {
+  provider: 'anthropic' | 'openai' | 'xai' | 'google';
+  configured: boolean;
+  key_hint: string;
+  updated_at: string | null;
+}
+
+export interface AgentMessageItem {
+  id: string;
+  from_agent: string;
+  from_agent_name?: string;
+  to_agent: string;
+  to_agent_name?: string;
+  task?: string | null;
+  parent_message?: string | null;
+  message_type: 'delegate' | 'review' | 'escalate' | 'context_sync' | 'result';
+  status: 'pending' | 'delivered' | 'acknowledged' | 'failed';
+  subject: string;
+  body: string;
+  payload?: Record<string, unknown>;
+  trace_id?: string;
+  correlation_id?: string;
+  created_at: string;
+  delivered_at?: string | null;
+  acknowledged_at?: string | null;
+}
+
+export interface CorporateDocumentItem {
+  id: string;
+  title: string;
+  doc_type: 'brief' | 'spec' | 'report' | 'sop' | 'retro' | 'memo' | 'playbook';
+  status: 'draft' | 'active' | 'archived';
+  scope: 'task' | 'epic' | 'org' | 'global';
+  area?: string;
+  initiative?: string;
+  version: number;
+  tags: string[];
+  summary?: string;
+  content?: string;
+  metadata?: Record<string, unknown>;
+  task?: string | null;
+  epic?: string | null;
+  created_by_agent_name?: string;
+  created_by_user_name?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CorporatePromptContextResponse {
+  query: string;
+  area?: string;
+  initiative?: string;
+  prompt_markdown: string;
+  documents: CorporateDocumentItem[];
+  memory_entries: CorporateMemoryEntryItem[];
+}
+
+export interface ContextGraphNode {
+  id: string;
+  label: string;
+  type: 'document' | 'memory' | 'area' | 'initiative' | 'tag';
+  doc_type?: string;
+  source_type?: string;
+  area?: string;
+  initiative?: string;
+}
+
+export interface ContextGraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  label?: string;
+}
+
+export interface ContextGraphResponse {
+  nodes: ContextGraphNode[];
+  edges: ContextGraphEdge[];
+}
+
+export interface CorporateMemoryEntryItem {
+  id: string;
+  title: string;
+  area?: string;
+  initiative?: string;
+  source_type: 'document' | 'decision' | 'workflow_run' | 'task' | 'manual';
+  source_id?: string;
+  summary?: string;
+  content?: string;
+  tags: string[];
+  metadata?: Record<string, unknown>;
+  times_reused: number;
+  last_used_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkflowPlaybookItem {
+  id: string;
+  name: string;
+  slug: string;
+  description?: string;
+  category?: string;
+  scope: 'task' | 'epic' | 'org' | 'global';
+  status: 'draft' | 'active' | 'archived';
+  is_template: boolean;
+  trigger_phrases: string[];
+  graph: Array<Record<string, unknown>>;
+  metadata?: Record<string, unknown>;
+  created_by_user_name?: string;
+  run_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkflowRunItem {
+  id: string;
+  playbook: string;
+  playbook_name?: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  scope: string;
+  input_payload?: Record<string, unknown>;
+  execution_log: string[];
+  result_payload?: Record<string, unknown>;
+  task?: string | null;
+  epic?: string | null;
+  created_by_user_name?: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ExecutiveDashboardData {
+  generated_at: string;
+  approvals_pending: number;
+  decisions_open: number;
+  active_documents: number;
+  memory_entries: number;
+  workflow_runs_today: number;
+  overloaded_agents: Array<Record<string, unknown>>;
+  pending_approvals: ApprovalRequestItem[];
+  recent_decisions: DecisionRecordItem[];
+  recent_documents: CorporateDocumentItem[];
+  recent_runs: WorkflowRunItem[];
 }
 
 export interface AgentCapacityItem {
@@ -320,7 +551,38 @@ export const apiClient: AxiosInstance & {
   login: (username: string, password: string) => Promise<AxiosResponse<unknown>>;
   register: (username: string, email: string, password: string) => Promise<AxiosResponse<unknown>>;
   getActiveAgents: () => Promise<AxiosResponse<unknown>>;
+  getAgents: () => Promise<AxiosResponse<AgentItem[]>>;
+  updateAgent: (id: string, payload: Partial<AgentItem>) => Promise<AxiosResponse<AgentItem>>;
+  deleteAgent: (id: string) => Promise<AxiosResponse<unknown>>;
   getAgentCapacity: () => Promise<AxiosResponse<AgentCapacityItem[]>>;
+  getAgentProviders: () => Promise<AxiosResponse<{ providers: AgentProviderOption[] }>>;
+  getProviderCredentialStatus: () => Promise<AxiosResponse<ProviderCredentialStatus[]>>;
+  saveProviderCredential: (payload: { provider: ProviderCredentialStatus['provider']; api_key: string }) => Promise<AxiosResponse<ProviderCredentialStatus>>;
+  getAgentInbox: (agentId: string) => Promise<AxiosResponse<AgentMessageItem[]>>;
+  getAgentOutbox: (agentId: string) => Promise<AxiosResponse<AgentMessageItem[]>>;
+  getExecutiveDashboard: () => Promise<AxiosResponse<ExecutiveDashboardData>>;
+  getCorporateDocuments: () => Promise<AxiosResponse<CorporateDocumentItem[]>>;
+  createCorporateDocument: (payload: Partial<CorporateDocumentItem>) => Promise<AxiosResponse<CorporateDocumentItem>>;
+  updateCorporateDocument: (id: string, payload: Partial<CorporateDocumentItem>) => Promise<AxiosResponse<CorporateDocumentItem>>;
+  uploadCorporateDocument: (payload: {
+    file: File;
+    title?: string;
+    doc_type?: CorporateDocumentItem['doc_type'];
+    scope?: CorporateDocumentItem['scope'];
+    area?: string;
+    initiative?: string;
+    summary?: string;
+    tags?: string[];
+  }) => Promise<AxiosResponse<CorporateDocumentItem>>;
+  getCorporatePromptContext: (params: { q: string; area?: string; initiative?: string }) => Promise<AxiosResponse<CorporatePromptContextResponse>>;
+  getCorporateContextGraph: () => Promise<AxiosResponse<ContextGraphResponse>>;
+  getCorporateMemory: () => Promise<AxiosResponse<CorporateMemoryEntryItem[]>>;
+  markCorporateMemoryReused: (id: string) => Promise<AxiosResponse<CorporateMemoryEntryItem>>;
+  getWorkflowPlaybooks: () => Promise<AxiosResponse<WorkflowPlaybookItem[]>>;
+  createWorkflowPlaybook: (payload: Partial<WorkflowPlaybookItem>) => Promise<AxiosResponse<WorkflowPlaybookItem>>;
+  seedWorkflowPlaybooks: () => Promise<AxiosResponse<{ created_count: number; items: WorkflowPlaybookItem[] }>>;
+  runWorkflowPlaybook: (id: string, payload: { scope?: string; input_payload?: Record<string, unknown>; task_id?: string; epic_id?: string }) => Promise<AxiosResponse<WorkflowRunItem>>;
+  getWorkflowRuns: () => Promise<AxiosResponse<WorkflowRunItem[]>>;
   getEpics: () => Promise<AxiosResponse<unknown>>;
   getEpicsByStatus: () => Promise<AxiosResponse<unknown>>;
   createEpic: (payload: EpicPayload) => Promise<AxiosResponse<unknown>>;
@@ -435,7 +697,64 @@ export const apiClient: AxiosInstance & {
 
   getActiveAgents: () => client.get('/agents/active/'),
 
+  getAgents: () => client.get('/agents/'),
+
+  updateAgent: (id, payload) => client.patch(`/agents/${id}/`, payload),
+
+  deleteAgent: (id) => client.delete(`/agents/${id}/`),
+
   getAgentCapacity: () => client.get('/agents/capacity/'),
+
+  getAgentProviders: () => client.get('/agents/providers/'),
+
+  getProviderCredentialStatus: () => client.get('/agents/credentials/status/'),
+
+  saveProviderCredential: (payload) => client.post('/agents/credentials/', payload),
+
+  getAgentInbox: (agentId: string) => client.get(`/agent-messages/inbox/?to_agent=${agentId}`),
+
+  getAgentOutbox: (agentId: string) => client.get(`/agent-messages/outbox/?from_agent=${agentId}`),
+
+  getExecutiveDashboard: () => client.get('/metrics/executive/'),
+
+  getCorporateDocuments: () => client.get('/corporate-documents/'),
+
+  createCorporateDocument: (payload) => client.post('/corporate-documents/', payload),
+
+  updateCorporateDocument: (id, payload) => client.patch(`/corporate-documents/${id}/`, payload),
+
+  uploadCorporateDocument: (payload) => {
+    const formData = new FormData();
+    formData.append('file', payload.file);
+    if (payload.title) formData.append('title', payload.title);
+    if (payload.doc_type) formData.append('doc_type', payload.doc_type);
+    if (payload.scope) formData.append('scope', payload.scope);
+    if (payload.area) formData.append('area', payload.area);
+    if (payload.initiative) formData.append('initiative', payload.initiative);
+    if (payload.summary) formData.append('summary', payload.summary);
+    if (payload.tags?.length) formData.append('tags', payload.tags.join(','));
+    return client.post('/corporate-documents/upload/', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+
+  getCorporatePromptContext: (params) => client.get('/corporate-documents/prompt_context/', { params }),
+
+  getCorporateContextGraph: () => client.get('/corporate-documents/context_graph/'),
+
+  getCorporateMemory: () => client.get('/corporate-memory/'),
+
+  markCorporateMemoryReused: (id) => client.post(`/corporate-memory/${id}/mark_reused/`),
+
+  getWorkflowPlaybooks: () => client.get('/workflow-playbooks/'),
+
+  createWorkflowPlaybook: (payload) => client.post('/workflow-playbooks/', payload),
+
+  seedWorkflowPlaybooks: () => client.post('/workflow-playbooks/seed_templates/'),
+
+  runWorkflowPlaybook: (id, payload) => client.post(`/workflow-playbooks/${id}/run/`, payload),
+
+  getWorkflowRuns: () => client.get('/workflow-runs/'),
 
   getEpics: () => client.get('/epics/'),
 

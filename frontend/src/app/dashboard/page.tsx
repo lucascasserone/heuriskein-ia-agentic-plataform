@@ -2,11 +2,9 @@
 
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import Link from 'next/link';
-import { Bot, Clock3, Gauge, ListChecks, AlertTriangle } from 'lucide-react';
+import { Bot, Clock3, Gauge, ListChecks, AlertTriangle, ShieldCheck, FileText, Network } from 'lucide-react';
 import LayoutPremium from '@/components/Layout/LayoutPremium';
-import { apiClient, MetricsOverview } from '@/lib/api';
-import { enhancedApiClient } from '@/lib/enhanced-api';
-import { withRetry } from '@/lib/api-utils';
+import { apiClient, ExecutiveDashboardData, MetricsOverview } from '@/lib/api';
 
 interface StatusMap {
   [key: string]: unknown[];
@@ -27,6 +25,7 @@ export default function DashboardPage() {
   const [taskByStatus, setTaskByStatus] = useState<StatusMap>({});
   const [epicByStatus, setEpicByStatus] = useState<StatusMap>({});
   const [activeAgents, setActiveAgents] = useState<number>(0);
+  const [executive, setExecutive] = useState<ExecutiveDashboardData | null>(null);
   const [healthUp, setHealthUp] = useState<boolean>(false);
   const [loading, setLoading] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
@@ -37,11 +36,18 @@ export default function DashboardPage() {
     setError(null);
     try {
       const [metricsRes, tasksRes, epicsRes, agentsRes] = await Promise.all([
-        enhancedApiClient.getMetricsOverview(),
-        enhancedApiClient.getTasksByStatus(),
-        enhancedApiClient.getEpicsByStatus(),
-        enhancedApiClient.getActiveAgents(),
+        apiClient.getMetricsOverview(),
+        apiClient.getTasksByStatus(),
+        apiClient.getEpicsByStatus(),
+        apiClient.getActiveAgents(),
       ]);
+
+      try {
+        const executiveRes = await apiClient.getExecutiveDashboard();
+        setExecutive(executiveRes.data || null);
+      } catch {
+        setExecutive(null);
+      }
 
       setMetrics(metricsRes.data || null);
       setTaskByStatus(normalizeStatusMap(tasksRes.data));
@@ -59,6 +65,7 @@ export default function DashboardPage() {
     } catch (err: any) {
       setError(err.message || 'Erro ao carregar dados');
       setHealthUp(false);
+      setExecutive(null);
     } finally {
       setLoading(false);
     }
@@ -91,6 +98,21 @@ export default function DashboardPage() {
       label: 'Agentes ativos',
       value: String(activeAgents),
       icon: <Bot size={16} className="text-secondary" />,
+    },
+    {
+      label: 'Aprovações pendentes',
+      value: String(executive?.approvals_pending ?? 0),
+      icon: <ShieldCheck size={16} className="text-amber-300" />,
+    },
+    {
+      label: 'Documentos ativos',
+      value: String(executive?.active_documents ?? 0),
+      icon: <FileText size={16} className="text-cyan-300" />,
+    },
+    {
+      label: 'Runs hoje',
+      value: String(executive?.workflow_runs_today ?? 0),
+      icon: <Network size={16} className="text-violet-300" />,
     },
   ];
 
@@ -132,7 +154,7 @@ export default function DashboardPage() {
             </div>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-7 gap-3">
             {kpis.map((kpi) => (
               <div key={kpi.label} className="rounded-xl border border-gray-metallic/25 bg-surface/50 p-4">
                 <div className="flex items-center gap-2 text-gray-light text-xs mb-2">
@@ -171,6 +193,80 @@ export default function DashboardPage() {
           </div>
         </div>
 
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+          <div className="rounded-xl border border-gray-metallic/25 bg-surface/40 p-4">
+            <h2 className="text-sm font-semibold text-text-title mb-3">Governança pendente</h2>
+            <div className="space-y-2 text-xs">
+              {(executive?.pending_approvals || []).length === 0 ? (
+                <p className="text-gray-light">Sem aprovações pendentes.</p>
+              ) : (
+                executive?.pending_approvals.map((item) => (
+                  <div key={item.id} className="rounded-lg border border-white/10 bg-black/20 p-3">
+                    <p className="text-text-title font-medium">{item.requested_by_agent_name || 'Sistema'} solicitou aprovação</p>
+                    <p className="text-gray-light">{item.rationale || 'Sem racional detalhado.'}</p>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-gray-metallic/25 bg-surface/40 p-4">
+            <h2 className="text-sm font-semibold text-text-title mb-3">Agentes sobrecarregados</h2>
+            <div className="space-y-2 text-xs">
+              {(executive?.overloaded_agents || []).length === 0 ? (
+                <p className="text-gray-light">Nenhum agente acima do limiar atual.</p>
+              ) : (
+                executive?.overloaded_agents.map((agent: any) => (
+                  <div key={agent.id} className="rounded-lg border border-white/10 bg-black/20 p-3 flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-text-title font-medium">{agent.name}</p>
+                      <p className="text-gray-light">Estado: {agent.state}</p>
+                    </div>
+                    <div className="text-right text-gray-light">
+                      <p>Total aberto: <span className="text-text-title font-semibold">{agent.open_total}</span></p>
+                      <p>Bloqueadas: <span className="text-text-title font-semibold">{agent.blocked}</span></p>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+          <div className="rounded-xl border border-gray-metallic/25 bg-surface/40 p-4">
+            <h2 className="text-sm font-semibold text-text-title mb-3">Documentos recentes</h2>
+            <div className="space-y-2 text-xs">
+              {(executive?.recent_documents || []).length === 0 ? (
+                <p className="text-gray-light">Sem documentos corporativos recentes.</p>
+              ) : (
+                executive?.recent_documents.map((doc) => (
+                  <div key={doc.id} className="rounded-lg border border-white/10 bg-black/20 p-3">
+                    <p className="text-text-title font-medium">{doc.title}</p>
+                    <p className="text-gray-light">{doc.doc_type} · {doc.area || 'sem área'} · v{doc.version}</p>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-gray-metallic/25 bg-surface/40 p-4">
+            <h2 className="text-sm font-semibold text-text-title mb-3">Workflow runs recentes</h2>
+            <div className="space-y-2 text-xs">
+              {(executive?.recent_runs || []).length === 0 ? (
+                <p className="text-gray-light">Sem execuções recentes de workflow.</p>
+              ) : (
+                executive?.recent_runs.map((run) => (
+                  <div key={run.id} className="rounded-lg border border-white/10 bg-black/20 p-3">
+                    <p className="text-text-title font-medium">{run.playbook_name}</p>
+                    <p className="text-gray-light">Status: {run.status} · Escopo: {run.scope}</p>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+
         <div className="rounded-xl border border-gray-metallic/25 bg-surface/40 p-4">
           <h2 className="text-sm font-semibold text-text-title mb-3">Atalhos operacionais</h2>
           <div className="flex flex-wrap gap-2 text-xs">
@@ -182,6 +278,12 @@ export default function DashboardPage() {
             </Link>
             <Link href="/analytics" className="px-3 py-1.5 rounded-md border border-yellow-400/40 bg-yellow-500/10 text-yellow-300 hover:bg-yellow-500/20">
               Ver Analytics
+            </Link>
+            <Link href="/records" className="px-3 py-1.5 rounded-md border border-cyan-400/40 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20">
+              Records
+            </Link>
+            <Link href="/playbooks" className="px-3 py-1.5 rounded-md border border-violet-400/40 bg-violet-500/10 text-violet-300 hover:bg-violet-500/20">
+              Playbooks
             </Link>
           </div>
           {(metrics?.queue_age_minutes || 0) > 30 && (

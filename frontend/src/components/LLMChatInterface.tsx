@@ -4,6 +4,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Send, Zap, Brain, Loader } from 'lucide-react';
 import { enhancedApiClient } from '@/lib/enhanced-api';
 import { useNotify } from '@/lib/toast';
+import { useAppStore } from '@/store/appStore';
 
 interface Message {
   id: string;
@@ -13,7 +14,12 @@ interface Message {
   isStreaming?: boolean;
 }
 
-export default function LLMChatInterface() {
+interface LLMChatInterfaceProps {
+  initialPrompt?: string;
+  initialContext?: Record<string, unknown>;
+}
+
+export default function LLMChatInterface({ initialPrompt = '', initialContext = {} }: LLMChatInterfaceProps) {
   const [isMounted, setIsMounted] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -23,11 +29,22 @@ export default function LLMChatInterface() {
       timestamp: new Date(),
     },
   ]);
-  const [inputValue, setInputValue] = useState('');
+  const [inputValue, setInputValue] = useState(initialPrompt || '');
   const [isLoading, setIsLoading] = useState(false);
+  const [sharedContext, setSharedContext] = useState<Record<string, unknown>>(initialContext || {});
   const abortRef = useRef<AbortController | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const notify = useNotify();
+  const selectedAgent = useAppStore((state) => state.selectedAgent);
+
+  useEffect(() => {
+    setSharedContext(initialContext || {});
+  }, [initialContext]);
+
+  useEffect(() => {
+    if (!initialPrompt) return;
+    setInputValue(initialPrompt);
+  }, [initialPrompt]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -105,7 +122,10 @@ export default function LLMChatInterface() {
             )
           );
         },
-        {},
+        {
+          ...sharedContext,
+          selected_agent_id: selectedAgent || undefined,
+        },
         controller.signal
       );
 
@@ -119,7 +139,10 @@ export default function LLMChatInterface() {
     } catch (error) {
       try {
         // Fallback: non-stream chat for environments where SSE may fail.
-        const fallback = await enhancedApiClient.sendChatMessage('', messageText, {});
+        const fallback = await enhancedApiClient.sendChatMessage('', messageText, {
+          ...sharedContext,
+          selected_agent_id: selectedAgent || undefined,
+        });
         const responseText =
           fallback.data?.agent_response ||
           fallback.data?.message ||
@@ -159,7 +182,7 @@ export default function LLMChatInterface() {
         </div>
         <div>
           <h3 className="text-sm font-bold text-primary">IA Coordinator</h3>
-          <p className="text-[11px] text-gray-light">Powered by Claude AI</p>
+          <p className="text-[11px] text-gray-light">Kanban, records e playbooks conectados ao chat</p>
         </div>
       </div>
 

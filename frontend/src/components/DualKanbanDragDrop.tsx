@@ -1,8 +1,8 @@
 'use client';
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Reorder, motion, AnimatePresence } from 'framer-motion';
-import { apiClient, AgentCapacityItem, MetricsOverview } from '@/lib/api';
+import { motion, AnimatePresence } from 'framer-motion';
+import { apiClient, AgentCapacityItem, MetricsOverview, getResolvedApiBaseUrl, getResolvedWsBaseUrl, isBackendUnavailableError } from '@/lib/api';
 import { LayoutGrid, Zap, CheckCircle2, Clock, AlertCircle, User, Timer, Eye, EyeOff, Pencil, Trash2, Search, X as XIcon, Minimize2, Maximize2, Plus, Code2, Globe, Wrench, ArrowRight, GitBranch } from 'lucide-react';
 import { useNotify } from '@/lib/toast';
 import EpicMasterView from '@/components/Modals/EpicMasterView';
@@ -139,7 +139,10 @@ export default function DualKanbanDragDrop() {
   const [clarifyingTask, setClarifyingTask] = useState<Task | null>(null);
   const [metrics, setMetrics] = useState<MetricsOverview | null>(null);
   const [agentCapacity, setAgentCapacity] = useState<AgentCapacityItem[]>([]);
+  const [backendUnavailable, setBackendUnavailable] = useState(false);
+  const [degradedSources, setDegradedSources] = useState<string[]>([]);
   const lastFetchErrorRef = useRef<string | null>(null);
+  const backendNoticeShownRef = useRef(false);
   const taskRealtime = useTaskRealtime();
 
   useEffect(() => {
@@ -255,12 +258,20 @@ export default function DualKanbanDragDrop() {
 
     let hasAnySuccess = false;
     const errors: string[] = [];
+    const offlineFailures: string[] = [];
+
+    const markOfflineFailure = (source: string, result: PromiseSettledResult<unknown>) => {
+      if (result.status === 'rejected' && isBackendUnavailableError(result.reason)) {
+        offlineFailures.push(source);
+      }
+    };
 
     if (epicsRes.status === 'fulfilled') {
       setEpics(epicsRes.value.data || {});
       hasAnySuccess = true;
     } else {
       errors.push('epicos');
+      markOfflineFailure('epicos', epicsRes);
     }
 
     if (tasksRes.status === 'fulfilled') {
@@ -268,6 +279,7 @@ export default function DualKanbanDragDrop() {
       hasAnySuccess = true;
     } else {
       errors.push('tarefas');
+      markOfflineFailure('tarefas', tasksRes);
     }
 
     if (metricsRes.status === 'fulfilled') {
@@ -275,6 +287,7 @@ export default function DualKanbanDragDrop() {
       hasAnySuccess = true;
     } else {
       errors.push('metricas');
+      markOfflineFailure('metricas', metricsRes);
     }
 
     if (capacityRes.status === 'fulfilled') {
@@ -283,44 +296,113 @@ export default function DualKanbanDragDrop() {
     } else {
       // Capacity panel is optional; keep board functional if this endpoint is temporarily unavailable.
       setAgentCapacity([]);
-      console.warn('Agent capacity endpoint unavailable');
+      markOfflineFailure('capacidade', capacityRes);
     }
+
+    const backendDown = !hasAnySuccess && offlineFailures.length >= 3;
+    setBackendUnavailable(backendDown);
+    setDegradedSources(errors);
+
+    if (backendDown) {
+      if (!backendNoticeShownRef.current) {
+        notify.error('Backend indisponível. Exibindo modo degradado do Kanban.');
+        backendNoticeShownRef.current = true;
+      }
+      return;
+    }
+
+    backendNoticeShownRef.current = false;
 
     if (errors.length > 0) {
       const signature = errors.join(',');
       if (lastFetchErrorRef.current !== signature) {
-        console.error('Error fetching data from:', errors);
         notify.error(`Dados indisponiveis: ${errors.join(', ')}`);
         lastFetchErrorRef.current = signature;
       }
     } else {
       lastFetchErrorRef.current = null;
     }
-
-    if (!hasAnySuccess) {
-      console.warn('No data sources available for kanban refresh');
-    }
   };
 
+  useEffect(() => {
+    if (taskRealtime.isConnected) {
+      setBackendUnavailable(false);
+      backendNoticeShownRef.current = false;
+    }
+  }, [taskRealtime.isConnected]);
+
   const handleDragEnd = async (
-    item: Epic | Task,
+    payload: { id: string; fromStatus: string; type: 'epic' | 'task' },
     newStatus: TaskStatus | EpicStatus,
-    type: 'epic' | 'task'
+    type: 'epic' | 'task',
+    targetItemId?: string,
   ) => {
+    const moveWithinBoard = <T extends Task | Epic>(
+      board: { [key: string]: T[] },
+      itemId: string,
+      fromStatus: string,
+      toStatus: string,
+      insertBeforeId?: string,
+    ) => {
+      const nextBoard: { [key: string]: T[] } = { ...board };
+      const sourceList = [...(nextBoard[fromStatus] || [])];
+      const sourceIndex = sourceList.findIndex((entry) => entry.id === itemId);
+      if (sourceIndex < 0) {
+        return board;
+      }
+
+      const [movedItem] = sourceList.splice(sourceIndex, 1);
+      nextBoard[fromStatus] = sourceList;
+
+      const destinationList = [...(nextBoard[toStatus] || [])];
+      const itemWithStatus =
+        fromStatus === toStatus
+          ? movedItem
+          : ({ ...movedItem, status: toStatus } as T);
+
+      const destinationIndex = insertBeforeId
+        ? destinationList.findIndex((entry) => entry.id === insertBeforeId)
+        : -1;
+
+      if (destinationIndex >= 0) {
+        destinationList.splice(destinationIndex, 0, itemWithStatus);
+      } else {
+        destinationList.push(itemWithStatus);
+      }
+      nextBoard[toStatus] = destinationList;
+      return nextBoard;
+    };
+
+    if (payload.type !== type) {
+      return;
+    }
+
+    const statusChanged = payload.fromStatus !== newStatus;
+
+    if (type === 'epic') {
+      setEpics((current) => moveWithinBoard(current, payload.id, payload.fromStatus, newStatus, targetItemId));
+    } else {
+      setTasks((current) => moveWithinBoard(current, payload.id, payload.fromStatus, newStatus, targetItemId));
+    }
+
+    if (!statusChanged) {
+      return;
+    }
+
     try {
       notify.loading('Atualizando status...');
 
       if (type === 'epic') {
-        await apiClient.updateEpic(item.id, { status: newStatus as EpicStatus });
+        await apiClient.updateEpic(payload.id, { status: newStatus as EpicStatus });
       } else {
-        await apiClient.updateTask(item.id, { status: newStatus as TaskStatus });
+        await apiClient.updateTask(payload.id, { status: newStatus as TaskStatus });
       }
 
       notify.success(`Status atualizado para "${newStatus}"`);
-      fetchData();
     } catch (error) {
       notify.error('Erro ao atualizar status');
       console.error('Error updating status:', error);
+      fetchData();
     }
   };
 
@@ -644,7 +726,25 @@ export default function DualKanbanDragDrop() {
           setEditingEpic(null);
           setIsCreateEpicOpen(false);
         }}
-        onSuccess={() => {
+        onSuccess={(updatedEpic) => {
+          if (updatedEpic?.id) {
+            setEpics((current) => {
+              const next = { ...current };
+              let previousStatus: EpicStatus | null = null;
+
+              (Object.keys(next) as EpicStatus[]).forEach((status) => {
+                const found = next[status]?.some((epic) => epic.id === updatedEpic.id);
+                if (found && !previousStatus) {
+                  previousStatus = status;
+                }
+                next[status] = (next[status] || []).filter((epic) => epic.id !== updatedEpic.id);
+              });
+
+              const destinationStatus = (updatedEpic.status || previousStatus || 'backlog') as EpicStatus;
+              next[destinationStatus] = [updatedEpic as Epic, ...(next[destinationStatus] || [])];
+              return next;
+            });
+          }
           setEditingEpic(null);
           setIsCreateEpicOpen(false);
           fetchData();
@@ -682,6 +782,29 @@ export default function DualKanbanDragDrop() {
         <div className="mb-3 text-xs text-gray-light flex items-center gap-2">
           <span className="inline-block w-2 h-2 rounded-full bg-primary animate-pulse" />
           <span>Carregando dados...</span>
+        </div>
+      )}
+
+      {backendUnavailable && (
+        <div className="mb-3 rounded-xl border border-amber-300/35 bg-amber-500/10 p-3 text-sm text-amber-100">
+          <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <p className="font-semibold">Backend offline ou inacessível</p>
+              <p className="mt-1 text-xs text-amber-100/85">
+                O Kanban entrou em modo degradado porque não conseguiu alcançar a API em {getResolvedApiBaseUrl()} e o realtime em {getResolvedWsBaseUrl() || 'ws://127.0.0.1:8001/ws'}.
+              </p>
+              <p className="mt-1 text-xs text-amber-100/75">
+                Fontes afetadas: {degradedSources.length ? degradedSources.join(', ') : 'epicos, tarefas, metricas'}.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => fetchData()}
+              className="inline-flex rounded-md border border-amber-200/40 bg-amber-400/15 px-3 py-2 text-xs font-medium text-amber-100 hover:bg-amber-400/25"
+            >
+              Tentar novamente
+            </button>
+          </div>
         </div>
       )}
 
@@ -941,7 +1064,8 @@ export default function DualKanbanDragDrop() {
                 items={filterEpicItems(epics[key] || [])}
                 type="epic"
                 cardStyle="blueprint"
-                onDragEnd={(item) => handleDragEnd(item, key as EpicStatus, 'epic')}
+                onDropItem={handleDragEnd}
+                onCardClick={(item) => handleEdit(item, 'epic')}
                 onStatusChange={handleStatusChange}
                 onTaskAction={handleTaskAction}
                 onEdit={(item) => handleEdit(item, 'epic')}
@@ -974,7 +1098,8 @@ export default function DualKanbanDragDrop() {
                 items={filterTaskItems(tasks[key] || [])}
                 type="task"
                 cardStyle="vivo"
-                onDragEnd={(item) => handleDragEnd(item, key as TaskStatus, 'task')}
+                onDropItem={handleDragEnd}
+                onCardClick={(item) => handleEdit(item, 'task')}
                 onStatusChange={handleStatusChange}
                 onTaskAction={handleTaskAction}
                 onEdit={(item) => handleEdit(item, 'task')}
@@ -1123,7 +1248,13 @@ interface ColumnProps {
   items: (Task | Epic)[];
   type: 'epic' | 'task';
   cardStyle: 'blueprint' | 'vivo';
-  onDragEnd: (item: Task | Epic) => void;
+  onDropItem: (
+    payload: { id: string; fromStatus: string; type: 'task' | 'epic' },
+    toStatus: TaskStatus | EpicStatus,
+    type: 'task' | 'epic',
+    targetItemId?: string,
+  ) => Promise<void>;
+  onCardClick: (item: Task | Epic) => void;
   onStatusChange: (item: Task | Epic, newStatus: TaskStatus | EpicStatus, type: 'task' | 'epic') => Promise<void>;
   onTaskAction: (task: Task, action: 'execute' | 'complete' | 'fail' | 'retry' | 'viewResult' | 'clarify' | 'focusOrg') => Promise<void>;
   onEdit: (item: Task | Epic) => void;
@@ -1138,7 +1269,8 @@ function KanbanColumnWithDragDrop({
   items,
   type,
   cardStyle,
-  onDragEnd,
+  onDropItem,
+  onCardClick,
   onStatusChange,
   onTaskAction,
   onEdit,
@@ -1146,13 +1278,44 @@ function KanbanColumnWithDragDrop({
   compactMode,
 }: ColumnProps) {
   const [orderedItems, setOrderedItems] = React.useState(items);
+  const [dragOverItemId, setDragOverItemId] = React.useState<string | null>(null);
   const [columnCompact, setColumnCompact] = React.useState(false);
+  const didDragRef = React.useRef(false);
   const isProcessing = status === 'processing';
   const effectiveCompact = compactMode || columnCompact;
 
   React.useEffect(() => {
     setOrderedItems(items);
   }, [items]);
+
+  const parseDragPayload = (raw: string) => {
+    try {
+      const payload = JSON.parse(raw) as { id: string; fromStatus: string; type: 'task' | 'epic' };
+      if (!payload?.id || !payload?.fromStatus || !payload?.type) {
+        return null;
+      }
+      return payload;
+    } catch {
+      return null;
+    }
+  };
+
+  const handleColumnDrop = async (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setDragOverItemId(null);
+    const payload = parseDragPayload(event.dataTransfer.getData('text/plain'));
+    if (!payload || payload.type !== type) return;
+    await onDropItem(payload, status as TaskStatus | EpicStatus, type);
+  };
+
+  const handleCardDrop = async (event: React.DragEvent<HTMLDivElement>, targetItemId: string) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setDragOverItemId(null);
+    const payload = parseDragPayload(event.dataTransfer.getData('text/plain'));
+    if (!payload || payload.type !== type || payload.id === targetItemId) return;
+    await onDropItem(payload, status as TaskStatus | EpicStatus, type, targetItemId);
+  };
 
   return (
     <motion.div
@@ -1186,43 +1349,70 @@ function KanbanColumnWithDragDrop({
         </motion.span>
       </div>
 
-      {/* Cards Container with Reorder */}
-      <div className={`overflow-y-auto overflow-x-hidden ${effectiveCompact ? 'px-1.5 lg:px-2 py-2 lg:py-2.5 space-y-1.5 lg:space-y-2' : 'px-2 lg:px-3 py-3 lg:py-4 space-y-2 lg:space-y-3'} max-h-[19rem] lg:max-h-[24rem]`}>
-        <Reorder.Group axis="y" values={orderedItems} onReorder={setOrderedItems}>
-          <AnimatePresence>
-            {orderedItems.length === 0 ? (
+      {/* Cards Container */}
+      <div
+        className={`overflow-y-auto overflow-x-hidden ${effectiveCompact ? 'px-1.5 lg:px-2 py-2 lg:py-2.5 space-y-1.5 lg:space-y-2' : 'px-2 lg:px-3 py-3 lg:py-4 space-y-2 lg:space-y-3'} max-h-[19rem] lg:max-h-[24rem]`}
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={handleColumnDrop}
+      >
+        <AnimatePresence>
+          {orderedItems.length === 0 ? (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="flex items-center justify-center h-full text-gray-light text-sm"
+            >
+              <p>Sem itens</p>
+            </motion.div>
+          ) : (
+            orderedItems.map((item) => (
               <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                className="flex items-center justify-center h-full text-gray-light text-sm"
+                key={item.id}
+                layout
+                draggable
+                onDragStart={(event) => {
+                  didDragRef.current = true;
+                  event.dataTransfer.effectAllowed = 'move';
+                  event.dataTransfer.setData(
+                    'text/plain',
+                    JSON.stringify({
+                      id: item.id,
+                      fromStatus: status,
+                      type,
+                    }),
+                  );
+                }}
+                onDragEnd={() => {
+                  window.setTimeout(() => {
+                    didDragRef.current = false;
+                  }, 0);
+                }}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setDragOverItemId(item.id);
+                }}
+                onDrop={(event) => handleCardDrop(event, item.id)}
+                className={`cursor-move ${dragOverItemId === item.id ? 'ring-1 ring-primary/50 rounded-lg' : ''}`}
               >
-                <p>Sem itens</p>
+                <DragDropCard
+                  item={item}
+                  type={type}
+                  status={status}
+                  cardStyle={cardStyle}
+                  onStatusChange={onStatusChange}
+                  onTaskAction={onTaskAction}
+                  onEdit={onEdit}
+                  onDelete={onDelete}
+                  onOpen={onCardClick}
+                  onClickGuard={() => didDragRef.current}
+                  compactMode={effectiveCompact}
+                />
               </motion.div>
-            ) : (
-              orderedItems.map((item) => (
-                <Reorder.Item
-                  key={item.id}
-                  value={item}
-                  onDragEnd={() => onDragEnd(item)}
-                  className="cursor-move"
-                >
-                  <DragDropCard 
-                    item={item} 
-                    type={type} 
-                    status={status} 
-                    cardStyle={cardStyle}
-                    onStatusChange={onStatusChange}
-                    onTaskAction={onTaskAction}
-                    onEdit={onEdit}
-                    onDelete={onDelete}
-                    compactMode={effectiveCompact}
-                  />
-                </Reorder.Item>
-              ))
-            )}
-          </AnimatePresence>
-        </Reorder.Group>
+            ))
+          )}
+        </AnimatePresence>
       </div>
     </motion.div>
   );
@@ -1237,10 +1427,12 @@ interface CardProps {
   onTaskAction: (task: Task, action: 'execute' | 'complete' | 'fail' | 'retry' | 'viewResult' | 'clarify' | 'focusOrg') => Promise<void>;
   onEdit: (item: Task | Epic) => void;
   onDelete: (item: Task | Epic) => void;
+  onOpen: (item: Task | Epic) => void;
+  onClickGuard: () => boolean;
   compactMode: boolean;
 }
 
-const DragDropCard = React.memo(function DragDropCard({ item, type, status, cardStyle, onStatusChange, onTaskAction, onEdit, onDelete, compactMode }: CardProps) {
+const DragDropCard = React.memo(function DragDropCard({ item, type, status, cardStyle, onStatusChange, onTaskAction, onEdit, onDelete, onOpen, onClickGuard, compactMode }: CardProps) {
   const title = 'goal' in item ? item.goal : item.title;
   const priority = item.priority || 'medium';
   const colors = priorityColors[priority as keyof typeof priorityColors] || priorityColors.medium;
@@ -1310,6 +1502,10 @@ const DragDropCard = React.memo(function DragDropCard({ item, type, status, card
       exit={{ opacity: 0, y: -10 }}
       whileHover={{ scale: 1.02 }}
       whileTap={{ scale: 0.98 }}
+      onClick={() => {
+        if (onClickGuard()) return;
+        onOpen(item);
+      }}
       className={`
         ${compactMode ? 'p-1.5 lg:p-2' : 'p-2 lg:p-3'} rounded-lg group cursor-grab active:cursor-grabbing overflow-x-hidden
         transition-all duration-300 backdrop-blur-sm
@@ -1482,7 +1678,10 @@ const DragDropCard = React.memo(function DragDropCard({ item, type, status, card
         </div>
       )}
 
-      <div className={`${compactMode ? 'pt-1.5 mt-1.5 gap-1.5' : 'pt-2 mt-2 gap-2'} border-t border-gray-metallic/20 flex flex-col`}>
+      <div
+        className={`${compactMode ? 'pt-1.5 mt-1.5 gap-1.5' : 'pt-2 mt-2 gap-2'} border-t border-gray-metallic/20 flex flex-col`}
+        onClick={(event) => event.stopPropagation()}
+      >
         {type === 'task' && (
           <button
             onClick={() => onTaskAction(item as Task, 'viewResult')}

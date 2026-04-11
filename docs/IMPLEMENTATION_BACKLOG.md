@@ -44,7 +44,7 @@ Use this file to:
 | BL-01 | Structured agent output contract | in-progress | P0 | - | Agent execution persists `summary`, `plan`, `subtasks`, `artifacts`, `risks`, `next_action`, `approval_needed` as structured data instead of text-only output. |
 | BL-02 | Task event timeline | in-progress | P0 | BL-01 | Every task shows a chronological history of creation, decomposition, assignment, execution, review, approval, rollback, and completion. |
 | BL-03 | Subtasks and dependencies | in-progress | P0 | BL-01 | Complex work can be decomposed into child subtasks with owners, dependencies, and aggregated progress. |
-| BL-04 | Chat as structured command surface | planned | P1 | BL-01, BL-03 | Chat messages create and update goals, plans, tasks, subtasks, and approvals instead of producing isolated conversational output. |
+| BL-04 | Chat as structured command surface | in-progress | P1 | BL-01, BL-03 | Chat messages create and update goals, plans, tasks, subtasks, and approvals instead of producing isolated conversational output. |
 | BL-05 | Automatic decomposition in execution engine | in-progress | P0 | BL-01, BL-03 | The engine generates subtasks by default for complex tasks and records handoffs. |
 | BL-06 | Artifact model and persistent attachments | in-progress | P0 | BL-01 | Tasks and epics can store documents, diffs, reports, specs, decisions, and test results as first-class artifacts. |
 | BL-07 | Sandbox to artifact integration | in-progress | P0 | BL-06 | File previews, snapshots, applies, and rollbacks appear as attached artifacts and timeline events. |
@@ -55,14 +55,14 @@ Use this file to:
 | BL-12 | Agent queue and capacity view | in-progress | P1 | BL-11 | Users can see WIP, queue, throughput, and overload by agent. |
 | BL-13 | Org chart linked to real work | in-progress | P1 | BL-03, BL-11 | Org nodes reflect tasks, subtasks, handoffs, and active workload by area and agent. |
 | BL-14 | Org chart to kanban synchronization | in-progress | P1 | BL-13 | Selecting org nodes filters and highlights related work in kanban, and vice versa. |
-| BL-15 | Approval workflow | planned | P1 | BL-06, BL-09 | Sensitive deliverables can pause for approval with approver, rationale, and outcome recorded. |
+| BL-15 | Approval workflow | in-progress | P1 | BL-06, BL-09 | Sensitive deliverables can pause for approval with approver, rationale, and outcome recorded. |
 | BL-16 | Decision center | in-progress | P2 | BL-15 | Strategic decisions are stored with supporting artifacts, rationale, impact, and scope. |
 | BL-17 | Advanced filters and search | done | P2 | BL-08 | Board and task detail support filters by team, agent, risk, due date, blocker, priority, and artifact type. |
-| BL-18 | Corporate documents and live records | planned | P2 | BL-06, BL-15 | Briefs, specs, reports, SOPs, retrospectives, and decision memos can be attached and versioned. |
-| BL-19 | Executive dashboard | planned | P2 | BL-12, BL-15, BL-16 | Leaders can view initiative health, bottlenecks, approvals pending, risk, and agent capacity. |
-| BL-20 | Corporate memory by area and initiative | planned | P2 | BL-18 | Agents reuse department, initiative, and workflow context consistently over time. |
-| BL-21 | Workflow graph and automation chains | planned | P2 | BL-04, BL-11 | The product supports chained execution steps, conditions, approvals, and tool actions similar to n8n-style flows. |
-| BL-22 | Business playbook library | planned | P3 | BL-18, BL-21 | Reusable operational playbooks exist for common business workflows such as hiring, launches, incidents, and support. |
+| BL-18 | Corporate documents and live records | in-progress | P2 | BL-06, BL-15 | Briefs, specs, reports, SOPs, retrospectives, and decision memos can be attached and versioned. |
+| BL-19 | Executive dashboard | in-progress | P2 | BL-12, BL-15, BL-16 | Leaders can view initiative health, bottlenecks, approvals pending, risk, and agent capacity. |
+| BL-20 | Corporate memory by area and initiative | in-progress | P2 | BL-18 | Agents reuse department, initiative, and workflow context consistently over time. |
+| BL-21 | Workflow graph and automation chains | in-progress | P2 | BL-04, BL-11 | The product supports chained execution steps, conditions, approvals, and tool actions similar to n8n-style flows. |
+| BL-22 | Business playbook library | in-progress | P3 | BL-18, BL-21 | Reusable operational playbooks exist for common business workflows such as hiring, launches, incidents, and support. |
 
 ## Implementation Waves
 
@@ -210,3 +210,4 @@ Why this slice next:
 - 2026-04-08: Implemented BL-15 foundation: formal approval requests for sensitive artifacts, decision records (approved/rejected), and mandatory approved request before file apply.
 - 2026-04-08: Started BL-16 Decision Center with persisted decision records, auto-generated approval decisions, manual decision registration, and a dedicated decisions tab in the task workspace.
 - 2026-04-08: Expanded BL-16 with decision supersession chains (supersedes link), task action to replace prior decisions, UI action in Decisions tab, and backend regression tests.
+- 2026-04-10: Added Wave 4/5 foundations: corporate documents, corporate memory entries, executive dashboard endpoint, workflow playbooks/runs, seeded playbook templates, chat commands for document creation and playbook execution, and frontend pages for records/playbooks.

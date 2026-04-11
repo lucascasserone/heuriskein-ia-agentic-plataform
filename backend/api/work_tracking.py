@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import uuid
 from typing import Iterable
 
-from api.models import Artifact, Subtask, TaskEvent
+from django.utils import timezone
+
+from api.models import AgentMessage, Artifact, Subtask, TaskEvent
 
 
 def record_task_event(task, event_type: str, message: str, agent=None, metadata: dict | None = None) -> TaskEvent:
@@ -69,3 +72,35 @@ def create_subtask(
     if depends_on:
         subtask.depends_on.set(depends_on)
     return subtask
+
+
+def create_agent_handoff(
+    *,
+    from_agent,
+    to_agent,
+    task=None,
+    message_type: str = 'delegate',
+    subject: str = '',
+    body: str = '',
+    payload: dict | None = None,
+    parent_message=None,
+    trace_id: str = '',
+    correlation_id: str = '',
+):
+    if not from_agent or not to_agent or from_agent.id == to_agent.id:
+        return None
+
+    return AgentMessage.objects.create(
+        from_agent=from_agent,
+        to_agent=to_agent,
+        task=task,
+        parent_message=parent_message,
+        message_type=message_type,
+        status='delivered',
+        subject=subject,
+        body=body,
+        payload=payload or {},
+        trace_id=trace_id or uuid.uuid4().hex[:16],
+        correlation_id=correlation_id or (str(task.id) if task else uuid.uuid4().hex[:16]),
+        delivered_at=timezone.now(),
+    )

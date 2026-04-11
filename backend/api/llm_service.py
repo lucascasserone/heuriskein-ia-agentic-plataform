@@ -4,6 +4,7 @@ Handles model inference, streaming, and token counting
 """
 
 import os
+from datetime import datetime
 from typing import AsyncGenerator, Generator, Optional
 from abc import ABC, abstractmethod
 from django.conf import settings
@@ -29,7 +30,7 @@ class LLMProvider(ABC):
 class ClaudeProvider(LLMProvider):
     """Anthropic Claude provider"""
     
-    def __init__(self):
+    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
         global HAS_ANTHROPIC
 
         try:
@@ -40,11 +41,11 @@ class ClaudeProvider(LLMProvider):
             HAS_ANTHROPIC = False
             raise ImportError(f"anthropic package unavailable: {e}")
         
-        api_key = getattr(settings, 'ANTHROPIC_API_KEY', '') or os.environ.get('ANTHROPIC_API_KEY', '')
+        api_key = api_key or getattr(settings, 'ANTHROPIC_API_KEY', '') or os.environ.get('ANTHROPIC_API_KEY', '')
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY not configured in environment")
         
-        self.model = getattr(settings, 'CLAUDE_MODEL', 'claude-3-5-sonnet-20241022')
+        self.model = model or getattr(settings, 'CLAUDE_MODEL', 'claude-3-5-sonnet-20241022')
         self.client = Anthropic(api_key=api_key)
 
     def _is_model_not_found_error(self, error_text: str) -> bool:
@@ -126,7 +127,7 @@ class ClaudeProvider(LLMProvider):
 class OpenAIProvider(LLMProvider):
     """OpenAI GPT provider"""
     
-    def __init__(self):
+    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None, base_url: Optional[str] = None):
         global HAS_OPENAI
 
         try:
@@ -137,12 +138,15 @@ class OpenAIProvider(LLMProvider):
             HAS_OPENAI = False
             raise ImportError(f"openai package unavailable: {e}")
         
-        api_key = getattr(settings, 'OPENAI_API_KEY', '') or os.environ.get('OPENAI_API_KEY', '')
+        api_key = api_key or getattr(settings, 'OPENAI_API_KEY', '') or os.environ.get('OPENAI_API_KEY', '')
         if not api_key:
             raise ValueError("OPENAI_API_KEY not configured in environment")
         
-        self.model = getattr(settings, 'OPENAI_MODEL', 'gpt-4')
-        self.client = OpenAI(api_key=api_key)
+        self.model = model or getattr(settings, 'OPENAI_MODEL', 'gpt-4')
+        if base_url:
+            self.client = OpenAI(api_key=api_key, base_url=base_url)
+        else:
+            self.client = OpenAI(api_key=api_key)
     
     def chat(self, messages: list[dict], system: Optional[str] = None) -> str:
         """Get non-streaming response from OpenAI"""
@@ -205,6 +209,50 @@ class LLMService:
                 raise Exception(f"Failed to initialize OpenAI: {str(e)}")
         else:
             raise ValueError(f"Unknown LLM provider: {provider_name}")
+
+    def _provider_api_key(self, provider: str) -> str:
+        env_map = {
+            'anthropic': 'ANTHROPIC_API_KEY',
+            'openai': 'OPENAI_API_KEY',
+            'xai': 'XAI_API_KEY',
+            'google': 'GOOGLE_API_KEY',
+        }
+        env_name = env_map.get(provider, '')
+        env_value = (getattr(settings, env_name, '') if env_name else '') or os.environ.get(env_name, '')
+        if env_value:
+            return env_value
+
+        try:
+            from api.models import ProviderCredential
+            item = ProviderCredential.objects.filter(provider=provider).first()
+            if item:
+                return item.get_api_key()
+        except Exception:
+            return ''
+
+        return ''
+
+    def _build_agent_provider(self, agent):
+        provider_name = getattr(agent, 'llm_provider', '') or 'anthropic'
+        llm_model = getattr(agent, 'llm_model', '') or getattr(settings, 'OPENAI_MODEL', 'gpt-4')
+        llm_version = getattr(agent, 'llm_version', '') or 'latest'
+        resolved_model = f"{llm_model}-{llm_version}" if llm_version and llm_version != 'latest' and provider_name in ('openai', 'xai', 'google') else llm_model
+        api_key = self._provider_api_key(provider_name)
+
+        if provider_name == 'anthropic':
+            return ClaudeProvider(api_key=api_key, model=llm_model)
+        if provider_name == 'openai':
+            return OpenAIProvider(api_key=api_key, model=resolved_model)
+        if provider_name == 'xai':
+            return OpenAIProvider(api_key=api_key, model=resolved_model, base_url='https://api.x.ai/v1')
+        if provider_name == 'google':
+            base_url = os.environ.get('GOOGLE_OPENAI_BASE_URL', 'https://generativelanguage.googleapis.com/v1beta/openai/')
+            return OpenAIProvider(api_key=api_key, model=resolved_model, base_url=base_url)
+        raise ValueError(f"Unknown LLM provider: {provider_name}")
+
+    def chat_for_agent(self, agent, messages: list[dict], system: Optional[str] = None) -> str:
+        provider = self._build_agent_provider(agent)
+        return provider.chat(messages, system)
     
     def chat(self, messages: list[dict], system: Optional[str] = None) -> str:
         """Get response from configured LLM"""

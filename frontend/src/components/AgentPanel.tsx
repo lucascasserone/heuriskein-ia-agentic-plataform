@@ -10,6 +10,8 @@ interface Agent {
   name: string;
   state: 'idle' | 'thinking' | 'executing' | 'blocked';
   model: string;
+  llm_model?: string;
+  llm_provider?: string;
   capabilities: string[];
   current_task: string | null;
 }
@@ -39,15 +41,16 @@ export default function AgentPanel() {
   useEffect(() => {
     const fetchAgents = async () => {
       try {
-        const response = await apiClient.getActiveAgents();
-        setAgents(response.data);
+        // Keep Team Hub in sync with the registered agents list used in Organizacao/Team.
+        const response = await apiClient.getAgents();
+        setAgents(Array.isArray(response.data) ? response.data : []);
       } catch (error) {
         console.error('Error fetching agents:', error);
       }
     };
 
     fetchAgents();
-    const interval = setInterval(fetchAgents, 5000); // Poll every 5 seconds
+    const interval = setInterval(fetchAgents, 7000);
 
     return () => clearInterval(interval);
   }, [setAgents]);
@@ -109,7 +112,10 @@ function AgentCard({ agent, selected, onSelect }: AgentCardProps) {
             <Circle size={8} className={stateColor} fill="currentColor" />
             <p className="font-medium truncate">{agent.name}</p>
           </div>
-          <p className="text-xs text-gray-400 mt-1">{agent.model}</p>
+          <p className="text-xs text-gray-400 mt-1">{agent.llm_model || agent.model}</p>
+          {agent.llm_provider ? (
+            <p className="text-[11px] text-gray-500">{agent.llm_provider}</p>
+          ) : null}
           <p className="text-xs text-gray-500">{stateLabel}</p>
         </div>
       </div>

@@ -1,32 +1,43 @@
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.contrib.auth import authenticate
 from django.utils import timezone
+from django.utils.text import slugify
 from django.db.models import Q, Count
 from datetime import timedelta
-import re
+import json
+import mimetypes
+import os
+from pathlib import Path
 import unicodedata
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
+from pypdf import PdfReader
 
-from api.models import Agent, Task, Epic, ThoughtLog, ChatMessage, ClarificationRequest, Artifact, Subtask, ApprovalRequest, DecisionRecord
+from api.models import Agent, Task, Epic, ThoughtLog, ChatMessage, ClarificationRequest, Artifact, Subtask, ApprovalRequest, DecisionRecord, ProviderCredential, AgentMessage, CorporateDocument, CorporateMemoryEntry, WorkflowPlaybook, WorkflowRun
 from api.serializers import (
     AgentSerializer, TaskSerializer, EpicSerializer,
     ThoughtLogSerializer, ChatMessageSerializer,
     RegisterSerializer, LoginSerializer, UserSerializer,
     ChatRequestSerializer, ChatResponseSerializer, ClarificationRequestSerializer,
-    TaskDetailSerializer, SubtaskSerializer, ApprovalRequestSerializer, DecisionRecordSerializer
+    TaskDetailSerializer, SubtaskSerializer, ApprovalRequestSerializer, DecisionRecordSerializer,
+    ProviderCredentialWriteSerializer, ProviderCredentialStatusSerializer,
+    AgentMessageSerializer, AgentMessageAckSerializer,
+    CorporateDocumentSerializer, CorporateMemoryEntrySerializer,
+    WorkflowPlaybookSerializer, WorkflowRunSerializer, ExecutiveDashboardSerializer
 )
 from api.epic_decomposition import ensure_epic_task_queue
 from api.llm_service import get_llm_service
 from api.execution_engine import execute_task_async
 from api.file_sandbox import preview_file_change, apply_file_change, rollback_snapshot
-from api.work_tracking import create_artifact, record_task_event
+from api.work_tracking import create_agent_handoff, create_artifact, record_task_event
 
 
 def _broadcast(group: str, event_type: str, payload: dict):
@@ -243,11 +254,68 @@ def _detect_chat_action_regex(raw: str) -> dict:
     create_terms = ['criar', 'crie', 'adicione', 'adicionar', 'novo', 'nova']
     epic_terms = ['epico', 'epic']
     task_terms = ['tarefa', 'task']
+    document_terms = ['documento', 'brief', 'spec', 'relatorio', 'report', 'sop', 'memo', 'retrospectiva', 'retro']
+    playbook_terms = ['playbook', 'workflow', 'fluxo']
 
     review_terms = ['revisar', 'revise', 'analisar', 'analisar', 'listar', 'mostra', 'mostrar', 'auditar', 'review']
     refinement_terms = ['refinamento', 'refinement']
     if any(term in normalized for term in review_terms) and any(term in normalized for term in epic_terms) and any(term in normalized for term in refinement_terms):
         return {'type': 'review_refinement_epics'}
+
+    if any(term in normalized for term in create_terms) and any(term in normalized for term in document_terms):
+        title = _extract_field([
+            r'(?:documento|brief|spec|relatorio|relatório|report|sop|memo|retro|retrospectiva)\s*[:\-]\s*(.+)',
+            r'criar\s+(?:um\s+|uma\s+)?(?:documento|brief|spec|relatorio|relatório|report|sop|memo|retro|retrospectiva)\s+(?:com\s+titulo\s+)?(.+)',
+        ], raw)
+        summary = _extract_field([r'(?:resumo|summary)\s*[:\-]\s*(.+)'], raw)
+        area = _extract_field([r'(?:area|área)\s*[:\-]\s*(.+)'], raw)
+        initiative = _extract_field([r'(?:iniciativa|initiative)\s*[:\-]\s*(.+)'], raw)
+        doc_type = _extract_field([r'(?:tipo|type)\s*[:\-]\s*(brief|spec|report|sop|retro|memo|playbook)'], raw)
+        if not doc_type:
+            if 'brief' in normalized:
+                doc_type = 'brief'
+            elif 'spec' in normalized:
+                doc_type = 'spec'
+            elif 'report' in normalized or 'relatorio' in normalized:
+                doc_type = 'report'
+            elif 'sop' in normalized:
+                doc_type = 'sop'
+            elif 'retro' in normalized or 'retrospectiva' in normalized:
+                doc_type = 'retro'
+            elif 'memo' in normalized:
+                doc_type = 'memo'
+            else:
+                doc_type = 'brief'
+        missing = []
+        if not title or len(title) < 5:
+            missing.append('title')
+        return {
+            'type': 'create_document',
+            'title': title.strip(' .;:') if title else '',
+            'summary': summary,
+            'area': area,
+            'initiative': initiative,
+            'doc_type': doc_type,
+            'missing': missing,
+        }
+
+    if any(term in normalized for term in ['executar', 'rodar', 'iniciar', 'run']) and any(term in normalized for term in playbook_terms):
+        playbook_ref = _extract_field([
+            r'(?:playbook|workflow|fluxo)\s*[:\-]\s*(.+)',
+            r'(?:executar|rodar|iniciar|run)\s+(?:o\s+|a\s+)?(?:playbook|workflow|fluxo)\s+(.+)',
+        ], raw)
+        area = _extract_field([r'(?:area|área)\s*[:\-]\s*(.+)'], raw)
+        initiative = _extract_field([r'(?:iniciativa|initiative)\s*[:\-]\s*(.+)'], raw)
+        missing = []
+        if not playbook_ref:
+            missing.append('playbook')
+        return {
+            'type': 'run_playbook',
+            'playbook_ref': playbook_ref.strip(' .;:') if playbook_ref else '',
+            'area': area,
+            'initiative': initiative,
+            'missing': missing,
+        }
 
     if any(term in normalized for term in ['status', 'situacao', 'situação']) and any(term in normalized for term in epic_terms):
         if any(term in normalized for term in ['alterar', 'mudar', 'atualizar', 'trocar', 'definir']):
@@ -403,6 +471,420 @@ def _build_refinement_review_message() -> tuple[str, int]:
     return ('\n'.join(lines), total)
 
 
+def _sync_corporate_memory(*, title: str, summary: str = '', content: str = '', area: str = '', initiative: str = '', source_type: str = 'manual', source_id: str = '', tags: list | None = None, metadata: dict | None = None):
+    defaults = {
+        'title': title,
+        'summary': summary,
+        'content': content,
+        'area': area or '',
+        'initiative': initiative or '',
+        'tags': tags or [],
+        'metadata': metadata or {},
+    }
+    if source_type and source_id:
+        entry, _ = CorporateMemoryEntry.objects.update_or_create(
+            source_type=source_type,
+            source_id=source_id,
+            defaults=defaults,
+        )
+        return entry
+    return CorporateMemoryEntry.objects.create(source_type=source_type, source_id=source_id or '', **defaults)
+
+
+def _trim_prompt_block(value: str, limit: int = 2400) -> str:
+    text = (value or '').strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit].rstrip()}\n..."
+
+
+def _extract_uploaded_document(uploaded_file) -> tuple[str, str]:
+    name = getattr(uploaded_file, 'name', 'documento') or 'documento'
+    suffix = Path(name).suffix.lower()
+    content_type = getattr(uploaded_file, 'content_type', '') or mimetypes.guess_type(name)[0] or 'application/octet-stream'
+
+    if suffix in {'.md', '.txt'}:
+        raw = uploaded_file.read()
+        uploaded_file.seek(0)
+        return raw.decode('utf-8', errors='ignore'), content_type
+
+    if suffix == '.pdf':
+        reader = PdfReader(uploaded_file)
+        chunks = []
+        for page in reader.pages:
+            try:
+                chunks.append(page.extract_text() or '')
+            except Exception:
+                continue
+        uploaded_file.seek(0)
+        return '\n\n'.join(chunk for chunk in chunks if chunk).strip(), content_type
+
+    raise ValueError('Formato não suportado. Use .md, .txt ou .pdf.')
+
+
+def _persist_uploaded_document(uploaded_file, document_id: str) -> dict:
+    original_name = getattr(uploaded_file, 'name', 'documento') or 'documento'
+    safe_name = Path(original_name).name.replace(' ', '_')
+    relative_dir = Path('corporate_documents')
+    relative_path = relative_dir / f'{document_id}_{safe_name}'
+    absolute_path = Path(settings.MEDIA_ROOT) / relative_path
+    absolute_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with absolute_path.open('wb') as destination:
+        for chunk in uploaded_file.chunks():
+            destination.write(chunk)
+
+    return {
+        'file_name': original_name,
+        'stored_path': relative_path.as_posix(),
+        'size': int(getattr(uploaded_file, 'size', 0) or 0),
+        'mime_type': getattr(uploaded_file, 'content_type', '') or mimetypes.guess_type(original_name)[0] or 'application/octet-stream',
+        'extension': Path(original_name).suffix.lower(),
+    }
+
+
+def _build_corporate_context(query: str, *, area: str = '', initiative: str = '', top_k: int = 5) -> dict:
+    query_text = (query or '').strip()
+    doc_queryset = CorporateDocument.objects.filter(status='active')
+    memory_queryset = CorporateMemoryEntry.objects.all()
+
+    if area:
+                doc_queryset = doc_queryset.filter(area__icontains=area)
+                memory_queryset = memory_queryset.filter(area__icontains=area)
+    if initiative:
+                doc_queryset = doc_queryset.filter(initiative__icontains=initiative)
+                memory_queryset = memory_queryset.filter(initiative__icontains=initiative)
+
+    if query_text:
+        doc_queryset = doc_queryset.filter(
+            Q(title__icontains=query_text)
+            | Q(summary__icontains=query_text)
+            | Q(content__icontains=query_text)
+            | Q(area__icontains=query_text)
+            | Q(initiative__icontains=query_text)
+            | Q(tags__icontains=query_text)
+        )
+        memory_queryset = memory_queryset.filter(
+            Q(title__icontains=query_text)
+            | Q(summary__icontains=query_text)
+            | Q(content__icontains=query_text)
+            | Q(area__icontains=query_text)
+            | Q(initiative__icontains=query_text)
+            | Q(tags__icontains=query_text)
+        )
+
+    documents = list(doc_queryset.order_by('-updated_at')[:top_k])
+    memories = list(memory_queryset.order_by('-times_reused', '-updated_at')[:top_k])
+
+    lines = []
+    if documents:
+        lines.append('## Contexto Corporativo Relevante')
+        for document in documents:
+            lines.append(
+                f"- Documento: {document.title} | tipo={document.doc_type} | area={document.area or '-'} | iniciativa={document.initiative or '-'}"
+            )
+            if document.summary:
+                lines.append(f"  Resumo: {_trim_prompt_block(document.summary, 280)}")
+            excerpt = document.content or ''
+            if excerpt:
+                lines.append(f"  Conteúdo: {_trim_prompt_block(excerpt, 420)}")
+
+    if memories:
+        lines.append('')
+        lines.append('## Memória Reutilizável')
+        for entry in memories:
+            lines.append(
+                f"- Memória: {entry.title} | origem={entry.source_type} | reuso={entry.times_reused}"
+            )
+            if entry.summary:
+                lines.append(f"  Resumo: {_trim_prompt_block(entry.summary, 240)}")
+            excerpt = entry.content or ''
+            if excerpt:
+                lines.append(f"  Conteúdo: {_trim_prompt_block(excerpt, 320)}")
+
+    return {
+        'documents': documents,
+        'memory_entries': memories,
+        'prompt_markdown': '\n'.join(lines).strip(),
+    }
+
+
+def _build_document_graph() -> dict:
+    documents = list(CorporateDocument.objects.order_by('-updated_at')[:80])
+    memory_entries = list(CorporateMemoryEntry.objects.order_by('-updated_at')[:80])
+    nodes = []
+    edges = []
+    seen_nodes = set()
+
+    def add_node(node_id: str, label: str, node_type: str, extra: dict | None = None):
+        if node_id in seen_nodes:
+            return
+        seen_nodes.add(node_id)
+        payload = {'id': node_id, 'label': label, 'type': node_type}
+        if extra:
+            payload.update(extra)
+        nodes.append(payload)
+
+    for document in documents:
+        doc_id = f'doc:{document.id}'
+        add_node(doc_id, document.title, 'document', {
+            'doc_type': document.doc_type,
+            'area': document.area,
+            'initiative': document.initiative,
+        })
+        if document.area:
+            area_id = f'area:{slugify(document.area)}'
+            add_node(area_id, document.area, 'area')
+            edges.append({'id': f'{doc_id}->{area_id}', 'source': doc_id, 'target': area_id, 'label': 'area'})
+        if document.initiative:
+            initiative_id = f'initiative:{slugify(document.initiative)}'
+            add_node(initiative_id, document.initiative, 'initiative')
+            edges.append({'id': f'{doc_id}->{initiative_id}', 'source': doc_id, 'target': initiative_id, 'label': 'initiative'})
+        for tag in (document.tags or [])[:6]:
+            tag_id = f'tag:{slugify(str(tag))}'
+            add_node(tag_id, str(tag), 'tag')
+            edges.append({'id': f'{doc_id}->{tag_id}', 'source': doc_id, 'target': tag_id, 'label': 'tag'})
+
+    for entry in memory_entries:
+        memory_id = f'memory:{entry.id}'
+        add_node(memory_id, entry.title, 'memory', {
+            'source_type': entry.source_type,
+            'area': entry.area,
+            'initiative': entry.initiative,
+        })
+        if entry.area:
+            area_id = f'area:{slugify(entry.area)}'
+            add_node(area_id, entry.area, 'area')
+            edges.append({'id': f'{memory_id}->{area_id}', 'source': memory_id, 'target': area_id, 'label': 'area'})
+        if entry.initiative:
+            initiative_id = f'initiative:{slugify(entry.initiative)}'
+            add_node(initiative_id, entry.initiative, 'initiative')
+            edges.append({'id': f'{memory_id}->{initiative_id}', 'source': memory_id, 'target': initiative_id, 'label': 'initiative'})
+        if entry.source_type == 'document' and entry.source_id:
+            doc_id = f'doc:{entry.source_id}'
+            edges.append({'id': f'{memory_id}->{doc_id}', 'source': memory_id, 'target': doc_id, 'label': 'deriva'})
+
+    return {'nodes': nodes, 'edges': edges}
+
+
+def _render_template_value(value, payload: dict):
+    if isinstance(value, str):
+        try:
+            return value.format(**payload)
+        except Exception:
+            return value
+    return value
+
+
+def _default_playbook_templates():
+    return [
+        {
+            'name': 'Product Launch Review',
+            'slug': 'product-launch-review',
+            'description': 'Cria task, brief e decisão operacional para lançamento de produto.',
+            'category': 'launch',
+            'scope': 'epic',
+            'status': 'active',
+            'is_template': True,
+            'trigger_phrases': ['lancar produto', 'product launch', 'go to market'],
+            'graph': [
+                {'action': 'create_task', 'title': 'Planejar lançamento: {initiative}', 'description': 'Criado pelo playbook de lançamento.', 'priority': 'high', 'status': 'queue'},
+                {'action': 'create_document', 'title': 'Brief de lançamento: {initiative}', 'doc_type': 'brief', 'status': 'active', 'scope': 'epic', 'summary': 'Brief executivo criado automaticamente.', 'content': 'Iniciativa: {initiative}\nÁrea: {area}\nObjetivo: organizar o lançamento.'},
+                {'action': 'create_decision', 'title': 'Aprovar kickoff do lançamento {initiative}', 'summary': 'Playbook iniciou o fluxo padrão de lançamento.', 'impact': 'high'},
+            ],
+        },
+        {
+            'name': 'Incident Response',
+            'slug': 'incident-response',
+            'description': 'Organiza triagem, relatório e registro para incidentes.',
+            'category': 'operations',
+            'scope': 'task',
+            'status': 'active',
+            'is_template': True,
+            'trigger_phrases': ['incidente', 'incident response', 'falha critica'],
+            'graph': [
+                {'action': 'create_task', 'title': 'Triagem de incidente: {initiative}', 'description': 'Iniciar triagem técnica e impacto.', 'priority': 'high', 'status': 'queue'},
+                {'action': 'create_document', 'title': 'Relatório de incidente: {initiative}', 'doc_type': 'report', 'status': 'active', 'scope': 'task', 'summary': 'Relatório inicial do incidente.', 'content': 'Contexto: {initiative}\nÁrea: {area}\nPróximo passo: estabilizar o serviço.'},
+            ],
+        },
+        {
+            'name': 'Hiring Request',
+            'slug': 'hiring-request',
+            'description': 'Formaliza demanda de contratação com memo e tarefas iniciais.',
+            'category': 'people',
+            'scope': 'org',
+            'status': 'active',
+            'is_template': True,
+            'trigger_phrases': ['contratacao', 'hiring request', 'abrir vaga'],
+            'graph': [
+                {'action': 'create_document', 'title': 'Memo de contratação: {initiative}', 'doc_type': 'memo', 'status': 'active', 'scope': 'org', 'summary': 'Pedido formal de contratação.', 'content': 'Área: {area}\nIniciativa: {initiative}\nMotivo: ampliar capacidade operacional.'},
+                {'action': 'create_task', 'title': 'Validar headcount para {initiative}', 'description': 'Conferir orçamento, senioridade e urgência.', 'priority': 'medium', 'status': 'queue'},
+            ],
+        },
+    ]
+
+
+def _seed_playbook_templates(user=None) -> list[WorkflowPlaybook]:
+    seeded = []
+    for item in _default_playbook_templates():
+        playbook, created = WorkflowPlaybook.objects.get_or_create(
+            slug=item['slug'],
+            defaults={**item, 'created_by_user': user},
+        )
+        if created:
+            seeded.append(playbook)
+    return seeded
+
+
+def _execute_workflow_run(run: WorkflowRun):
+    payload = run.input_payload or {}
+    execution_log = []
+    result_payload = {'created_tasks': [], 'created_documents': [], 'created_decisions': [], 'approval_requests': [], 'messages': []}
+
+    run.status = 'running'
+    run.started_at = timezone.now()
+    run.execution_log = execution_log
+    run.save(update_fields=['status', 'started_at', 'execution_log', 'updated_at'])
+
+    try:
+        for index, step in enumerate(run.playbook.graph or [], start=1):
+            action = str(step.get('action') or '').strip().lower()
+            execution_log.append(f'[{index}] Executando {action}')
+
+            if action == 'create_task':
+                task = Task.objects.create(
+                    title=_render_template_value(step.get('title') or f'Task from {run.playbook.name}', payload),
+                    description=_render_template_value(step.get('description') or '', payload),
+                    priority=str(step.get('priority') or 'medium'),
+                    status=str(step.get('status') or 'queue'),
+                    epic=run.epic,
+                )
+                result_payload['created_tasks'].append({'id': str(task.id), 'title': task.title})
+                execution_log.append(f'[{index}] Task criada: {task.title}')
+            elif action == 'create_document':
+                document = CorporateDocument.objects.create(
+                    title=_render_template_value(step.get('title') or f'Document from {run.playbook.name}', payload),
+                    doc_type=str(step.get('doc_type') or 'brief'),
+                    status=str(step.get('status') or 'active'),
+                    scope=str(step.get('scope') or run.scope or 'global'),
+                    area=_render_template_value(step.get('area') or payload.get('area') or '', payload),
+                    initiative=_render_template_value(step.get('initiative') or payload.get('initiative') or '', payload),
+                    summary=_render_template_value(step.get('summary') or '', payload),
+                    content=_render_template_value(step.get('content') or '', payload),
+                    task=run.task,
+                    epic=run.epic,
+                    created_by_user=run.created_by_user,
+                    metadata={'playbook_id': str(run.playbook_id), 'run_id': str(run.id), 'step_index': index},
+                )
+                _sync_corporate_memory(
+                    title=document.title,
+                    summary=document.summary,
+                    content=document.content,
+                    area=document.area,
+                    initiative=document.initiative,
+                    source_type='document',
+                    source_id=str(document.id),
+                    tags=document.tags,
+                    metadata=document.metadata,
+                )
+                result_payload['created_documents'].append({'id': str(document.id), 'title': document.title})
+                execution_log.append(f'[{index}] Documento criado: {document.title}')
+            elif action == 'create_decision':
+                if not run.task:
+                    execution_log.append(f'[{index}] Pulado: create_decision exige task vinculada.')
+                    continue
+                decision = DecisionRecord.objects.create(
+                    task=run.task,
+                    created_by_user=run.created_by_user,
+                    title=_render_template_value(step.get('title') or f'Decision from {run.playbook.name}', payload),
+                    summary=_render_template_value(step.get('summary') or '', payload),
+                    rationale=_render_template_value(step.get('rationale') or '', payload),
+                    scope='task',
+                    status='accepted',
+                    impact=str(step.get('impact') or 'medium'),
+                    decided_by=run.created_by_user,
+                    decided_at=timezone.now(),
+                )
+                _sync_corporate_memory(
+                    title=decision.title,
+                    summary=decision.summary,
+                    content=decision.rationale,
+                    area=str(payload.get('area') or ''),
+                    initiative=str(payload.get('initiative') or ''),
+                    source_type='decision',
+                    source_id=str(decision.id),
+                    tags=['decision', run.playbook.category],
+                    metadata={'playbook_id': str(run.playbook_id), 'run_id': str(run.id)},
+                )
+                result_payload['created_decisions'].append({'id': str(decision.id), 'title': decision.title})
+                execution_log.append(f'[{index}] Decisão criada: {decision.title}')
+            elif action == 'request_approval':
+                if not run.task:
+                    execution_log.append(f'[{index}] Pulado: request_approval exige task vinculada.')
+                    continue
+                artifact_id = str(step.get('artifact_id') or payload.get('artifact_id') or '')
+                artifact = Artifact.objects.filter(id=artifact_id, task=run.task).first() if artifact_id else run.task.artifacts.order_by('-created_at').first()
+                if not artifact:
+                    execution_log.append(f'[{index}] Pulado: nenhum artefato elegível para aprovação.')
+                    continue
+                approval, _ = ApprovalRequest.objects.get_or_create(
+                    task=run.task,
+                    artifact=artifact,
+                    status='pending',
+                    defaults={
+                        'requested_by_agent': run.task.assigned_to,
+                        'requested_by_user': run.created_by_user,
+                        'rationale': _render_template_value(step.get('rationale') or f'Aprovação solicitada pelo playbook {run.playbook.name}', payload),
+                    },
+                )
+                result_payload['approval_requests'].append({'id': str(approval.id), 'artifact_id': str(artifact.id)})
+                execution_log.append(f'[{index}] Aprovação solicitada para artefato {artifact.title}')
+            elif action == 'handoff_message':
+                from_agent = Agent.objects.filter(id=str(step.get('from_agent_id') or payload.get('from_agent_id') or '')).first()
+                to_agent = Agent.objects.filter(id=str(step.get('to_agent_id') or payload.get('to_agent_id') or '')).first()
+                handoff = create_agent_handoff(
+                    from_agent=from_agent,
+                    to_agent=to_agent,
+                    task=run.task,
+                    message_type=str(step.get('message_type') or 'delegate'),
+                    subject=_render_template_value(step.get('subject') or f'Handoff via {run.playbook.name}', payload),
+                    body=_render_template_value(step.get('body') or '', payload),
+                    payload={'playbook_id': str(run.playbook_id), 'run_id': str(run.id), 'step_index': index},
+                )
+                if handoff:
+                    result_payload['messages'].append({'id': str(handoff.id), 'subject': handoff.subject})
+                    execution_log.append(f'[{index}] Mensagem enviada: {handoff.subject}')
+                else:
+                    execution_log.append(f'[{index}] Pulado: handoff_message sem agentes válidos.')
+            else:
+                execution_log.append(f'[{index}] Pulado: ação {action} não suportada.')
+
+        _sync_corporate_memory(
+            title=f'Workflow run: {run.playbook.name}',
+            summary='Execução recente de workflow/playbook registrada para reuso.',
+            content='\n'.join(execution_log[-8:]),
+            area=str(payload.get('area') or ''),
+            initiative=str(payload.get('initiative') or ''),
+            source_type='workflow_run',
+            source_id=str(run.id),
+            tags=['workflow', run.playbook.category],
+            metadata={'playbook_id': str(run.playbook_id), 'status': 'completed'},
+        )
+        run.status = 'completed'
+        run.completed_at = timezone.now()
+        run.execution_log = execution_log
+        run.result_payload = result_payload
+        run.save(update_fields=['status', 'completed_at', 'execution_log', 'result_payload', 'updated_at'])
+    except Exception as exc:
+        execution_log.append(f'Erro: {str(exc)}')
+        run.status = 'failed'
+        run.completed_at = timezone.now()
+        run.execution_log = execution_log
+        run.result_payload = {'error': str(exc), **result_payload}
+        run.save(update_fields=['status', 'completed_at', 'execution_log', 'result_payload', 'updated_at'])
+    return run
+
+
 def _should_request_creation_confirmation(message: str, action: dict) -> bool:
     if action.get('type') != 'create_epic' or action.get('missing'):
         return False
@@ -475,6 +957,92 @@ class UserDetailAPIView(APIView):
     def get(self, request):
         serializer = UserSerializer(request.user)
         return Response(serializer.data)
+
+
+class AgentProvidersAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        payload = {
+            'providers': [
+                {
+                    'id': 'anthropic',
+                    'label': 'Anthropic',
+                    'models': ['claude-3-5-sonnet', 'claude-3-5-haiku', 'claude-3-opus'],
+                },
+                {
+                    'id': 'openai',
+                    'label': 'OpenAI',
+                    'models': ['gpt-4o', 'gpt-4.1', 'gpt-4.1-mini'],
+                },
+                {
+                    'id': 'xai',
+                    'label': 'xAI (Grok)',
+                    'models': ['grok-2-1212', 'grok-2-mini-1212'],
+                },
+                {
+                    'id': 'google',
+                    'label': 'Google (Gemini)',
+                    'models': ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash'],
+                },
+            ]
+        }
+        return Response(payload)
+
+
+class ProviderCredentialsStatusAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        if (not settings.DEBUG) and (not request.user or not request.user.is_authenticated):
+            return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        providers = ['anthropic', 'openai', 'xai', 'google']
+        env_key_map = {
+            'anthropic': 'ANTHROPIC_API_KEY',
+            'openai': 'OPENAI_API_KEY',
+            'xai': 'XAI_API_KEY',
+            'google': 'GOOGLE_API_KEY',
+        }
+        payload = []
+        for provider in providers:
+            item = ProviderCredential.objects.filter(provider=provider).first()
+            env_name = env_key_map.get(provider)
+            env_value = (getattr(settings, env_name, '') if env_name else '') or ''
+            configured = bool(item is not None or env_value)
+            payload.append({
+                'provider': provider,
+                'configured': configured,
+                'key_hint': item.key_hint if item else ('env' if env_value else ''),
+                'updated_at': item.updated_at if item else None,
+            })
+        serializer = ProviderCredentialStatusSerializer(payload, many=True)
+        return Response(serializer.data)
+
+
+class ProviderCredentialsUpsertAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        if (not settings.DEBUG) and (not request.user or not request.user.is_authenticated):
+            return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        serializer = ProviderCredentialWriteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        provider = serializer.validated_data['provider']
+        raw_key = serializer.validated_data['api_key']
+
+        item, _ = ProviderCredential.objects.get_or_create(provider=provider)
+        item.set_api_key(raw_key)
+        item.save(update_fields=['encrypted_api_key', 'key_hint', 'updated_at'])
+
+        return Response({
+            'provider': provider,
+            'configured': True,
+            'key_hint': item.key_hint,
+            'updated_at': item.updated_at,
+        }, status=status.HTTP_200_OK)
 
 
 class AgentViewSet(viewsets.ModelViewSet):
@@ -556,6 +1124,81 @@ class AgentViewSet(viewsets.ModelViewSet):
         payload.sort(key=lambda item: item['load']['open_total'], reverse=True)
         return Response(payload)
 
+    @action(detail=False, methods=['get'])
+    def providers(self, request):
+        payload = {
+            'providers': [
+                {
+                    'id': 'anthropic',
+                    'label': 'Anthropic',
+                    'models': ['claude-3-5-sonnet', 'claude-3-5-haiku', 'claude-3-opus'],
+                },
+                {
+                    'id': 'openai',
+                    'label': 'OpenAI',
+                    'models': ['gpt-4o', 'gpt-4.1', 'gpt-4.1-mini'],
+                },
+                {
+                    'id': 'xai',
+                    'label': 'xAI (Grok)',
+                    'models': ['grok-2-1212', 'grok-2-mini-1212'],
+                },
+                {
+                    'id': 'google',
+                    'label': 'Google (Gemini)',
+                    'models': ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash'],
+                },
+            ]
+        }
+        return Response(payload)
+
+    @action(detail=False, methods=['get'], url_path='credentials/status')
+    def credentials_status(self, request):
+        if (not settings.DEBUG) and (not request.user or not request.user.is_authenticated):
+            return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
+        providers = ['anthropic', 'openai', 'xai', 'google']
+        env_key_map = {
+            'anthropic': 'ANTHROPIC_API_KEY',
+            'openai': 'OPENAI_API_KEY',
+            'xai': 'XAI_API_KEY',
+            'google': 'GOOGLE_API_KEY',
+        }
+        payload = []
+        for provider in providers:
+            item = ProviderCredential.objects.filter(provider=provider).first()
+            env_name = env_key_map.get(provider)
+            env_value = (getattr(settings, env_name, '') if env_name else '') or ''
+            configured = bool(item is not None or env_value)
+            payload.append({
+                'provider': provider,
+                'configured': configured,
+                'key_hint': item.key_hint if item else ('env' if env_value else ''),
+                'updated_at': item.updated_at if item else None,
+            })
+        serializer = ProviderCredentialStatusSerializer(payload, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['post'], url_path='credentials')
+    def upsert_credentials(self, request):
+        if (not settings.DEBUG) and (not request.user or not request.user.is_authenticated):
+            return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
+        serializer = ProviderCredentialWriteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        provider = serializer.validated_data['provider']
+        raw_key = serializer.validated_data['api_key']
+
+        item, _ = ProviderCredential.objects.get_or_create(provider=provider)
+        item.set_api_key(raw_key)
+        item.save(update_fields=['encrypted_api_key', 'key_hint', 'updated_at'])
+
+        return Response({
+            'provider': provider,
+            'configured': True,
+            'key_hint': item.key_hint,
+            'updated_at': item.updated_at,
+        }, status=status.HTTP_200_OK)
+
 
 class EpicViewSet(viewsets.ModelViewSet):
     """
@@ -598,6 +1241,248 @@ class EpicViewSet(viewsets.ModelViewSet):
             epics = Epic.objects.filter(status=status_key)
             result[status_key] = EpicSerializer(epics, many=True).data
         return Response(result)
+
+
+class AgentMessageViewSet(viewsets.ModelViewSet):
+    """Node-to-node structured messages between agents."""
+
+    queryset = AgentMessage.objects.select_related('from_agent', 'to_agent', 'task', 'parent_message')
+    serializer_class = AgentMessageSerializer
+    permission_classes = [AllowAny]
+    filterset_fields = ['from_agent', 'to_agent', 'task', 'message_type', 'status']
+    ordering_fields = ['created_at', 'delivered_at', 'acknowledged_at']
+    ordering = ['-created_at']
+
+    def perform_create(self, serializer):
+        message = serializer.save(status='delivered', delivered_at=timezone.now())
+        if message.task_id:
+            record_task_event(
+                message.task,
+                'updated',
+                f'Handoff {message.from_agent.name} -> {message.to_agent.name}: {message.subject or message.message_type}',
+                agent=message.from_agent,
+                metadata={
+                    'agent_message_id': str(message.id),
+                    'message_type': message.message_type,
+                    'to_agent_id': str(message.to_agent_id),
+                    'trace_id': message.trace_id,
+                    'correlation_id': message.correlation_id,
+                },
+            )
+
+    @action(detail=False, methods=['get'])
+    def inbox(self, request):
+        to_agent = request.query_params.get('to_agent')
+        if not to_agent:
+            return Response({'error': 'Query param to_agent é obrigatório.'}, status=status.HTTP_400_BAD_REQUEST)
+        qs = self.get_queryset().filter(to_agent_id=to_agent)
+        serializer = self.get_serializer(qs, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'])
+    def outbox(self, request):
+        from_agent = request.query_params.get('from_agent')
+        if not from_agent:
+            return Response({'error': 'Query param from_agent é obrigatório.'}, status=status.HTTP_400_BAD_REQUEST)
+        qs = self.get_queryset().filter(from_agent_id=from_agent)
+        serializer = self.get_serializer(qs, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'])
+    def acknowledge(self, request, pk=None):
+        message = self.get_object()
+        serializer = AgentMessageAckSerializer(data=request.data or {})
+        serializer.is_valid(raise_exception=True)
+        new_status = serializer.validated_data['status']
+
+        message.status = new_status
+        if new_status == 'acknowledged':
+            message.acknowledged_at = timezone.now()
+        message.save(update_fields=['status', 'acknowledged_at'])
+
+        return Response(self.get_serializer(message).data)
+
+
+class CorporateDocumentViewSet(viewsets.ModelViewSet):
+    queryset = CorporateDocument.objects.all().select_related('task', 'epic', 'created_by_agent', 'created_by_user')
+    serializer_class = CorporateDocumentSerializer
+    permission_classes = [AllowAny]
+    parser_classes = [MultiPartParser, FormParser]
+    filterset_fields = ['doc_type', 'status', 'scope', 'area', 'initiative', 'task', 'epic']
+    search_fields = ['title', 'summary', 'content', 'area', 'initiative']
+    ordering_fields = ['updated_at', 'created_at', 'version']
+    ordering = ['-updated_at']
+
+    def perform_create(self, serializer):
+        user = self.request.user if self.request.user.is_authenticated else None
+        document = serializer.save(created_by_user=user)
+        if document.task_id and not document.created_by_agent:
+            document.created_by_agent = document.task.assigned_to
+            document.save(update_fields=['created_by_agent', 'updated_at'])
+        _sync_corporate_memory(
+            title=document.title,
+            summary=document.summary,
+            content=document.content,
+            area=document.area,
+            initiative=document.initiative,
+            source_type='document',
+            source_id=str(document.id),
+            tags=document.tags,
+            metadata=document.metadata,
+        )
+
+    def perform_update(self, serializer):
+        previous = serializer.instance
+        document = serializer.save(version=(previous.version or 1) + 1)
+        _sync_corporate_memory(
+            title=document.title,
+            summary=document.summary,
+            content=document.content,
+            area=document.area,
+            initiative=document.initiative,
+            source_type='document',
+            source_id=str(document.id),
+            tags=document.tags,
+            metadata=document.metadata,
+        )
+
+    @action(detail=False, methods=['post'])
+    def upload(self, request):
+        uploaded_file = request.FILES.get('file')
+        if not uploaded_file:
+            return Response({'error': 'Arquivo é obrigatório.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            extracted_text, content_type = _extract_uploaded_document(uploaded_file)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            return Response({'error': f'Falha ao processar arquivo: {exc}'}, status=status.HTTP_400_BAD_REQUEST)
+
+        title = (request.data.get('title') or Path(uploaded_file.name).stem or 'Documento anexado').strip()
+        summary = (request.data.get('summary') or extracted_text[:280]).strip()
+        area = (request.data.get('area') or '').strip()
+        initiative = (request.data.get('initiative') or '').strip()
+        doc_type = (request.data.get('doc_type') or 'brief').strip() or 'brief'
+        scope = (request.data.get('scope') or 'org').strip() or 'org'
+        status_value = (request.data.get('status') or 'active').strip() or 'active'
+        tags = [tag.strip() for tag in str(request.data.get('tags') or '').split(',') if tag.strip()]
+        tags = list(dict.fromkeys([doc_type, Path(uploaded_file.name).suffix.lower().lstrip('.'), *tags]))
+
+        document = CorporateDocument.objects.create(
+            title=title,
+            doc_type=doc_type,
+            status=status_value,
+            scope=scope,
+            area=area,
+            initiative=initiative,
+            summary=summary,
+            content=extracted_text,
+            tags=tags,
+            created_by_user=request.user if request.user.is_authenticated else None,
+            metadata={
+                'source': 'upload',
+                'source_format': Path(uploaded_file.name).suffix.lower().lstrip('.'),
+                'mime_type': content_type,
+            },
+        )
+        file_meta = _persist_uploaded_document(uploaded_file, str(document.id))
+        document.metadata = {**(document.metadata or {}), 'attachment': file_meta}
+        document.save(update_fields=['metadata', 'updated_at'])
+
+        _sync_corporate_memory(
+            title=document.title,
+            summary=document.summary,
+            content=document.content,
+            area=document.area,
+            initiative=document.initiative,
+            source_type='document',
+            source_id=str(document.id),
+            tags=document.tags,
+            metadata=document.metadata,
+        )
+
+        return Response(self.get_serializer(document).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['get'])
+    def prompt_context(self, request):
+        query = request.query_params.get('q', '')
+        area = request.query_params.get('area', '')
+        initiative = request.query_params.get('initiative', '')
+        context_payload = _build_corporate_context(query, area=area, initiative=initiative)
+
+        return Response({
+            'query': query,
+            'area': area,
+            'initiative': initiative,
+            'prompt_markdown': context_payload['prompt_markdown'],
+            'documents': CorporateDocumentSerializer(context_payload['documents'], many=True).data,
+            'memory_entries': CorporateMemoryEntrySerializer(context_payload['memory_entries'], many=True).data,
+        })
+
+    @action(detail=False, methods=['get'])
+    def context_graph(self, request):
+        return Response(_build_document_graph())
+
+
+class CorporateMemoryEntryViewSet(viewsets.ModelViewSet):
+    queryset = CorporateMemoryEntry.objects.all()
+    serializer_class = CorporateMemoryEntrySerializer
+    permission_classes = [AllowAny]
+    filterset_fields = ['area', 'initiative', 'source_type']
+    search_fields = ['title', 'summary', 'content']
+    ordering_fields = ['updated_at', 'created_at', 'times_reused']
+    ordering = ['-updated_at']
+
+    @action(detail=True, methods=['post'])
+    def mark_reused(self, request, pk=None):
+        entry = self.get_object()
+        entry.times_reused += 1
+        entry.last_used_at = timezone.now()
+        entry.save(update_fields=['times_reused', 'last_used_at', 'updated_at'])
+        return Response(self.get_serializer(entry).data)
+
+
+class WorkflowPlaybookViewSet(viewsets.ModelViewSet):
+    queryset = WorkflowPlaybook.objects.all().prefetch_related('runs')
+    serializer_class = WorkflowPlaybookSerializer
+    permission_classes = [AllowAny]
+    filterset_fields = ['category', 'scope', 'status', 'is_template']
+    search_fields = ['name', 'slug', 'description', 'category']
+    ordering_fields = ['name', 'updated_at', 'created_at']
+    ordering = ['name']
+
+    def perform_create(self, serializer):
+        serializer.save(created_by_user=self.request.user if self.request.user.is_authenticated else None)
+
+    @action(detail=False, methods=['post'])
+    def seed_templates(self, request):
+        items = _seed_playbook_templates(request.user if request.user.is_authenticated else None)
+        serializer = self.get_serializer(items, many=True)
+        return Response({'created_count': len(items), 'items': serializer.data})
+
+    @action(detail=True, methods=['post'])
+    def run(self, request, pk=None):
+        playbook = self.get_object()
+        run = WorkflowRun.objects.create(
+            playbook=playbook,
+            scope=(request.data.get('scope') or playbook.scope or 'global'),
+            input_payload=request.data.get('input_payload') or {},
+            task=Task.objects.filter(id=(request.data.get('task_id') or '')).first(),
+            epic=Epic.objects.filter(id=(request.data.get('epic_id') or '')).first(),
+            created_by_user=request.user if request.user.is_authenticated else None,
+        )
+        _execute_workflow_run(run)
+        return Response(WorkflowRunSerializer(run).data, status=status.HTTP_201_CREATED)
+
+
+class WorkflowRunViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = WorkflowRun.objects.all().select_related('playbook', 'task', 'epic', 'created_by_user')
+    serializer_class = WorkflowRunSerializer
+    permission_classes = [AllowAny]
+    filterset_fields = ['status', 'playbook', 'scope', 'task', 'epic']
+    ordering_fields = ['created_at', 'started_at', 'completed_at']
+    ordering = ['-created_at']
 
 
 class TaskViewSet(viewsets.ModelViewSet):
@@ -643,6 +1528,38 @@ class TaskViewSet(viewsets.ModelViewSet):
                     'to_agent_id': str(task.assigned_to.id) if task.assigned_to else None,
                 },
             )
+            handoff = create_agent_handoff(
+                from_agent=previous_assigned_to,
+                to_agent=task.assigned_to,
+                task=task,
+                message_type='delegate',
+                subject=f'Handoff de tarefa: {task.title}',
+                body=(
+                    f'Responsabilidade da tarefa transferida de {from_name} para {to_name}.\n\n'
+                    f'Status atual: {task.status}\nPrioridade: {task.priority}\n\n'
+                    f'Descrição: {task.description or "Sem descrição adicional."}'
+                ),
+                payload={
+                    'source': 'task_update',
+                    'task_id': str(task.id),
+                    'task_title': task.title,
+                    'from_agent_id': str(previous_assigned_to.id) if previous_assigned_to else None,
+                    'to_agent_id': str(task.assigned_to.id) if task.assigned_to else None,
+                    'status': task.status,
+                    'priority': task.priority,
+                },
+            )
+            if handoff:
+                record_task_event(
+                    task,
+                    'updated',
+                    f'Mensagem node-to-node criada para o handoff {from_name} -> {to_name}',
+                    agent=previous_assigned_to,
+                    metadata={
+                        'agent_message_id': str(handoff.id),
+                        'message_type': handoff.message_type,
+                    },
+                )
 
         if previous_status != task.status:
             record_task_event(
@@ -1001,6 +1918,18 @@ class TaskViewSet(viewsets.ModelViewSet):
             },
         )
 
+        _sync_corporate_memory(
+            title=decision.title,
+            summary=decision.summary,
+            content=decision.rationale,
+            area=task.assigned_to.organization if task.assigned_to else '',
+            initiative=task.epic.goal if task.epic else task.title,
+            source_type='decision',
+            source_id=str(decision.id),
+            tags=['decision', decision.scope, decision.impact],
+            metadata={'task_id': str(task.id), 'epic_id': str(task.epic_id) if task.epic_id else None},
+        )
+
         return Response(DecisionRecordSerializer(decision).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'])
@@ -1070,6 +1999,18 @@ class TaskViewSet(viewsets.ModelViewSet):
                 'impact': replacement.impact,
                 'scope': replacement.scope,
             },
+        )
+
+        _sync_corporate_memory(
+            title=replacement.title,
+            summary=replacement.summary,
+            content=replacement.rationale,
+            area=task.assigned_to.organization if task.assigned_to else '',
+            initiative=task.epic.goal if task.epic else task.title,
+            source_type='decision',
+            source_id=str(replacement.id),
+            tags=['decision', 'superseded', replacement.scope],
+            metadata={'task_id': str(task.id), 'supersedes': str(previous.id)},
         )
 
         return Response(DecisionRecordSerializer(replacement).data, status=status.HTTP_201_CREATED)
@@ -1353,9 +2294,37 @@ class SubtaskViewSet(viewsets.ModelViewSet):
             agent=subtask.assigned_to or subtask.task.assigned_to,
             metadata={'subtask_id': str(subtask.id), 'source': subtask.source},
         )
+        handoff = create_agent_handoff(
+            from_agent=subtask.task.assigned_to,
+            to_agent=subtask.assigned_to,
+            task=subtask.task,
+            message_type='delegate',
+            subject=f'Subtarefa delegada: {subtask.title}',
+            body=(
+                f'Nova subtarefa atribuída: {subtask.title}.\n\n'
+                f'Descrição: {subtask.description or "Sem descrição adicional."}\n'
+                f'Prioridade: {subtask.priority}\nStatus: {subtask.status}'
+            ),
+            payload={
+                'source': 'subtask_create',
+                'subtask_id': str(subtask.id),
+                'subtask_title': subtask.title,
+                'priority': subtask.priority,
+                'status': subtask.status,
+            },
+        )
+        if handoff:
+            record_task_event(
+                subtask.task,
+                'updated',
+                f'Mensagem node-to-node criada para a subtarefa {subtask.title}',
+                agent=subtask.task.assigned_to,
+                metadata={'subtask_id': str(subtask.id), 'agent_message_id': str(handoff.id)},
+            )
 
     def perform_update(self, serializer):
         previous = serializer.instance
+        previous_assigned_to = previous.assigned_to
         subtask = serializer.save()
         record_task_event(
             subtask.task,
@@ -1368,6 +2337,32 @@ class SubtaskViewSet(viewsets.ModelViewSet):
                 'status': subtask.status,
             },
         )
+        handoff = create_agent_handoff(
+            from_agent=previous_assigned_to or subtask.task.assigned_to,
+            to_agent=subtask.assigned_to,
+            task=subtask.task,
+            message_type='delegate',
+            subject=f'Redelegação de subtarefa: {subtask.title}',
+            body=(
+                f'A subtarefa {subtask.title} foi reatribuída para outro agente.\n\n'
+                f'Status atual: {subtask.status}\nPrioridade: {subtask.priority}'
+            ),
+            payload={
+                'source': 'subtask_update',
+                'subtask_id': str(subtask.id),
+                'subtask_title': subtask.title,
+                'previous_assigned_to': str(previous_assigned_to.id) if previous_assigned_to else None,
+                'assigned_to': str(subtask.assigned_to.id) if subtask.assigned_to else None,
+            },
+        )
+        if handoff:
+            record_task_event(
+                subtask.task,
+                'updated',
+                f'Mensagem node-to-node criada para a reatribuição da subtarefa {subtask.title}',
+                agent=previous_assigned_to or subtask.task.assigned_to,
+                metadata={'subtask_id': str(subtask.id), 'agent_message_id': str(handoff.id)},
+            )
 
 
 class HealthCheckAPIView(APIView):
@@ -1509,6 +2504,49 @@ class MetricsTimeseriesAPIView(APIView):
         })
 
 
+class ExecutiveDashboardAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        now = timezone.now()
+        overloaded_agents = []
+        agents = Agent.objects.all().annotate(
+            queue_count=Count('tasks', filter=Q(tasks__status='queue')),
+            processing_count=Count('tasks', filter=Q(tasks__status='processing')),
+            blocked_count=Count('tasks', filter=Q(tasks__status='blocked')),
+            review_count=Count('tasks', filter=Q(tasks__status='review')),
+        )
+
+        for agent in agents:
+            active_load = agent.processing_count + agent.blocked_count + agent.review_count
+            open_total = active_load + agent.queue_count
+            if open_total >= 4 or agent.blocked_count >= 2:
+                overloaded_agents.append({
+                    'id': str(agent.id),
+                    'name': agent.name,
+                    'state': agent.state,
+                    'open_total': open_total,
+                    'blocked': agent.blocked_count,
+                    'queue': agent.queue_count,
+                })
+
+        payload = {
+            'generated_at': now,
+            'approvals_pending': ApprovalRequest.objects.filter(status='pending').count(),
+            'decisions_open': DecisionRecord.objects.filter(status='proposed').count(),
+            'active_documents': CorporateDocument.objects.filter(status='active').count(),
+            'memory_entries': CorporateMemoryEntry.objects.count(),
+            'workflow_runs_today': WorkflowRun.objects.filter(created_at__date=now.date()).count(),
+            'overloaded_agents': overloaded_agents[:5],
+            'pending_approvals': ApprovalRequest.objects.filter(status='pending').select_related('task', 'artifact', 'requested_by_agent')[:6],
+            'recent_decisions': DecisionRecord.objects.select_related('task', 'created_by_agent', 'created_by_user', 'decided_by')[:6],
+            'recent_documents': CorporateDocument.objects.select_related('created_by_agent', 'created_by_user', 'task', 'epic')[:6],
+            'recent_runs': WorkflowRun.objects.select_related('playbook', 'created_by_user', 'task', 'epic')[:6],
+        }
+        serializer = ExecutiveDashboardSerializer(payload)
+        return Response(serializer.data)
+
+
 class ChatAPIView(APIView):
     """Chat endpoint integrado com LLM (Claude/OpenAI)"""
     permission_classes = [AllowAny]  # Dev: Allow without auth
@@ -1548,6 +2586,18 @@ class ChatAPIView(APIView):
 
             action = _detect_chat_action(user_message)
             pending_intent = _get_pending_intent(chat_user)
+
+            # If the chat was opened from playbooks with context payload, run it directly.
+            if action.get('type') == 'none' and isinstance(context, dict):
+                playbook_hint = str(context.get('playbook_hint') or context.get('playbook_id') or '').strip()
+                if playbook_hint:
+                    action = {
+                        'type': 'run_playbook',
+                        'playbook_ref': playbook_hint,
+                        'area': str(context.get('area') or '').strip(),
+                        'initiative': str(context.get('initiative') or '').strip(),
+                        'missing': [],
+                    }
 
             if action.get('type') == 'none' and pending_intent.get('type') == 'create_epic_confirm':
                 if _is_confirmation_message(user_message):
@@ -2107,11 +3157,188 @@ class ChatAPIView(APIView):
                     },
                     'created_at': chat_message.created_at,
                 }, status=status.HTTP_200_OK)
+
+            if action.get('type') == 'create_document':
+                if action.get('missing'):
+                    clarification = (
+                        'Para criar o documento corporativo preciso ao menos do título. '
+                        'Exemplo: "Criar brief: Lançamento Q2; área: Marketing; iniciativa: Expansão SMB".'
+                    )
+                    chat_message = ChatMessage.objects.create(
+                        agent=agent,
+                        user=chat_user,
+                        user_message=user_message,
+                        agent_response=clarification,
+                        context={**context, 'action': 'create_document', 'result': 'missing_data', 'missing': action.get('missing', [])}
+                    )
+                    return Response({
+                        'id': str(chat_message.id),
+                        'agent': agent.name,
+                        'agent_id': str(agent.id),
+                        'user_message': user_message,
+                        'agent_response': clarification,
+                        'action': 'create_document',
+                        'created': False,
+                        'created_at': chat_message.created_at,
+                    }, status=status.HTTP_200_OK)
+
+                document = CorporateDocument.objects.create(
+                    title=action['title'],
+                    doc_type=action.get('doc_type') or 'brief',
+                    status='active',
+                    scope='org',
+                    area=action.get('area') or '',
+                    initiative=action.get('initiative') or '',
+                    summary=action.get('summary') or '',
+                    content=context.get('content', '') if isinstance(context, dict) else '',
+                    created_by_agent=agent,
+                    created_by_user=chat_user,
+                    metadata={'source': 'chat', 'chat_context': context},
+                )
+                _sync_corporate_memory(
+                    title=document.title,
+                    summary=document.summary,
+                    content=document.content,
+                    area=document.area,
+                    initiative=document.initiative,
+                    source_type='document',
+                    source_id=str(document.id),
+                    tags=[document.doc_type, 'chat'],
+                    metadata=document.metadata,
+                )
+                creation_msg = (
+                    f"Documento corporativo criado. ID: {document.id} | Título: {document.title} | "
+                    f"Tipo: {document.doc_type} | Área: {document.area or '-'} | Iniciativa: {document.initiative or '-'}"
+                )
+                chat_message = ChatMessage.objects.create(
+                    agent=agent,
+                    user=chat_user,
+                    user_message=user_message,
+                    agent_response=creation_msg,
+                    context={**context, 'action': 'create_document', 'result': 'created', 'document_id': str(document.id)}
+                )
+                return Response({
+                    'id': str(chat_message.id),
+                    'agent': agent.name,
+                    'agent_id': str(agent.id),
+                    'user_message': user_message,
+                    'agent_response': creation_msg,
+                    'action': 'create_document',
+                    'created': True,
+                    'document': CorporateDocumentSerializer(document).data,
+                    'created_at': chat_message.created_at,
+                }, status=status.HTTP_200_OK)
+
+            if action.get('type') == 'run_playbook':
+                if action.get('missing'):
+                    clarification = (
+                        'Para executar um playbook, informe o nome ou slug. '
+                        'Exemplo: "Executar playbook: incident-response; área: TI; iniciativa: API 500".'
+                    )
+                    chat_message = ChatMessage.objects.create(
+                        agent=agent,
+                        user=chat_user,
+                        user_message=user_message,
+                        agent_response=clarification,
+                        context={**context, 'action': 'run_playbook', 'result': 'missing_data', 'missing': action.get('missing', [])}
+                    )
+                    return Response({
+                        'id': str(chat_message.id),
+                        'agent': agent.name,
+                        'agent_id': str(agent.id),
+                        'user_message': user_message,
+                        'agent_response': clarification,
+                        'action': 'run_playbook',
+                        'created': False,
+                        'created_at': chat_message.created_at,
+                    }, status=status.HTTP_200_OK)
+
+                if not WorkflowPlaybook.objects.exists():
+                    _seed_playbook_templates(chat_user)
+
+                playbook_ref = action.get('playbook_ref') or ''
+                playbook = WorkflowPlaybook.objects.filter(Q(slug=slugify(playbook_ref)) | Q(name__icontains=playbook_ref)).order_by('name').first()
+                if not playbook:
+                    not_found_msg = 'Playbook não encontrado. Use a biblioteca de playbooks para ver os disponíveis.'
+                    chat_message = ChatMessage.objects.create(
+                        agent=agent,
+                        user=chat_user,
+                        user_message=user_message,
+                        agent_response=not_found_msg,
+                        context={**context, 'action': 'run_playbook', 'result': 'not_found'}
+                    )
+                    return Response({
+                        'id': str(chat_message.id),
+                        'agent': agent.name,
+                        'agent_id': str(agent.id),
+                        'user_message': user_message,
+                        'agent_response': not_found_msg,
+                        'action': 'run_playbook',
+                        'created_at': chat_message.created_at,
+                    }, status=status.HTTP_200_OK)
+
+                run = WorkflowRun.objects.create(
+                    playbook=playbook,
+                    scope=playbook.scope,
+                    input_payload={
+                        'area': action.get('area') or '',
+                        'initiative': action.get('initiative') or playbook_ref,
+                        **(context if isinstance(context, dict) else {}),
+                    },
+                    created_by_user=chat_user,
+                )
+                _execute_workflow_run(run)
+                run_msg = (
+                    f"Playbook executado: {playbook.name}. Status final: {run.status}. "
+                    f"Tasks criadas: {len((run.result_payload or {}).get('created_tasks', []))} | "
+                    f"Documentos criados: {len((run.result_payload or {}).get('created_documents', []))}."
+                )
+                chat_message = ChatMessage.objects.create(
+                    agent=agent,
+                    user=chat_user,
+                    user_message=user_message,
+                    agent_response=run_msg,
+                    context={**context, 'action': 'run_playbook', 'result': run.status, 'workflow_run_id': str(run.id), 'playbook_id': str(playbook.id)}
+                )
+                return Response({
+                    'id': str(chat_message.id),
+                    'agent': agent.name,
+                    'agent_id': str(agent.id),
+                    'user_message': user_message,
+                    'agent_response': run_msg,
+                    'action': 'run_playbook',
+                    'run': WorkflowRunSerializer(run).data,
+                    'created_at': chat_message.created_at,
+                }, status=status.HTTP_200_OK)
             
             # Prepare messages for LLM
+            knowledge_context = _build_corporate_context(
+                user_message,
+                area=str(context.get('area') or '') if isinstance(context, dict) else '',
+                initiative=str(context.get('initiative') or '') if isinstance(context, dict) else '',
+                top_k=4,
+            )
+            prompt_context_markdown = knowledge_context.get('prompt_markdown') or ''
             messages = [
                 {"role": "user", "content": user_message}
             ]
+            if prompt_context_markdown:
+                context['corporate_prompt_context'] = prompt_context_markdown
+                context['corporate_memory_hits'] = [
+                    {
+                        'id': str(item.id),
+                        'title': item.title,
+                        'type': 'document',
+                    }
+                    for item in knowledge_context.get('documents', [])
+                ] + [
+                    {
+                        'id': str(item.id),
+                        'title': item.title,
+                        'type': 'memory',
+                    }
+                    for item in knowledge_context.get('memory_entries', [])
+                ]
             
             # Get LLM service and generate response
             llm_service = None
@@ -2123,6 +3350,8 @@ class ChatAPIView(APIView):
             fallback_response = (
                 'LLM indisponivel no momento. Configure ANTHROPIC_API_KEY ou OPENAI_API_KEY para respostas inteligentes.'
             )
+            if prompt_context_markdown:
+                system_prompt = f"{system_prompt}\n\n### Base de Conhecimento (.md/.txt/.pdf)\n{prompt_context_markdown}"
             
             if stream:
                 # Streaming response (SSE - Server-Sent Events)

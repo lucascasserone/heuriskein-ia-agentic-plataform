@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { useAppStore } from '@/store/appStore';
 import { apiClient } from '@/lib/api';
 import { LayoutGrid, Zap, CheckCircle2, Clock, AlertCircle } from 'lucide-react';
@@ -262,6 +263,19 @@ function KanbanCard({ item, type, isProcessing, status }: CardProps) {
           </p>
         </div>
       )}
+
+      <div className="mt-2">
+        <Link
+          href={
+            type === 'task'
+              ? `/chat?q=${encodeURIComponent(`Atualize e priorize a tarefa ${title}.`)}&task_id=${encodeURIComponent(item.id)}`
+              : `/chat?q=${encodeURIComponent(`Atualize e decomponha o épico ${title}.`)}&epic_id=${encodeURIComponent(item.id)}`
+          }
+          className="inline-flex rounded-md border border-cyan-400/35 bg-cyan-500/10 px-2 py-1 text-[10px] text-cyan-200 hover:bg-cyan-500/20"
+        >
+          Continuar no chat
+        </Link>
+      </div>
 
       {/* Agent Assignment (for Tasks) */}
       {type === 'task' && 'assigned_to' in item && item.assigned_to && (

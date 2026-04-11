@@ -141,6 +141,7 @@ export default function Sidebar({ collapsed = false, onToggleCollapse }: Sidebar
       items: [
         { icon: <Home size={18} />, label: 'Dashboard', href: '/dashboard' },
         { icon: <BarChart3 size={18} />, label: 'Analytics', href: '/analytics' },
+        { icon: <GitBranch size={18} />, label: 'Playbooks', href: '/playbooks' },
       ],
     },
     {
@@ -154,6 +155,7 @@ export default function Sidebar({ collapsed = false, onToggleCollapse }: Sidebar
       title: 'SUPORTE',
       items: [
         { icon: <MessageSquare size={18} />, label: 'Chat', href: '/chat' },
+        { icon: <Settings size={18} />, label: 'Records', href: '/records' },
       ],
     },
   ];
@@ -214,6 +216,11 @@ export default function Sidebar({ collapsed = false, onToggleCollapse }: Sidebar
         <div className="flex items-center justify-between mb-2">
           {!effectiveCollapsed && <h3 className="text-[10px] font-bold text-slate-300 uppercase tracking-[0.22em]">Team Hub</h3>}
           <div className="flex items-center gap-2">
+            {!agentRealtime.isConnected && !effectiveCollapsed ? (
+              <span className="rounded border border-amber-400/25 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-200">
+                offline
+              </span>
+            ) : null}
             <span className="text-xs font-mono text-primary">
               {agents.filter((a) => a.state === 'executing' || a.state === 'thinking').length} ativos
             </span>
@@ -231,7 +238,9 @@ export default function Sidebar({ collapsed = false, onToggleCollapse }: Sidebar
 
         {!teamHubCollapsed && (
           agents.length === 0 ? (
-            <p className="text-xs text-gray-dim text-center py-2">Sem agentes cadastrados</p>
+            <p className="text-xs text-gray-dim text-center py-2">
+              {agentRealtime.isConnected ? 'Sem agentes cadastrados' : 'Aguardando conexão com backend'}
+            </p>
           ) : (
             <div className={`sidebar-scroll ${effectiveCollapsed ? 'space-y-1.5 max-h-40' : 'space-y-1 max-h-44'} overflow-y-auto pr-1`}>
               {orderedAgents.slice(0, 8).map((agent) => (

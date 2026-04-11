@@ -26,7 +26,7 @@ const nextConfig = {
         : 'ws://127.0.0.1:8001/ws'),
   },
   headers: async () => {
-    return [
+    const headers = [
       {
         source: '/api/:path*',
         headers: [
@@ -41,6 +41,31 @@ const nextConfig = {
         ],
       },
     ];
+
+    if (!isProd) {
+      headers.push(
+        {
+          source: '/_next/static/:path*',
+          headers: [
+            {
+              key: 'Cache-Control',
+              value: 'no-store, no-cache, must-revalidate, proxy-revalidate',
+            },
+          ],
+        },
+        {
+          source: '/:path*',
+          headers: [
+            {
+              key: 'Cache-Control',
+              value: 'no-store, no-cache, must-revalidate, proxy-revalidate',
+            },
+          ],
+        }
+      );
+    }
+
+    return headers;
   },
 };
 

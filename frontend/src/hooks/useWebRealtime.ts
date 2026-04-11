@@ -27,9 +27,8 @@ function resolveWsBaseUrls() {
 
     if (hostname === 'localhost' || hostname === '127.0.0.1') {
       const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      // Prefer :8001, then fallback to :8000 for local dev setups.
+      // Local dev standard for this workspace is port 8001.
       pushUnique(`${wsScheme}://${hostname}:8001/ws`);
-      pushUnique(`${wsScheme}://${hostname}:8000/ws`);
     }
   }
 
@@ -77,6 +76,7 @@ export function useWebRealtime(
   const reconnectAttemptsRef = useRef(0);
   const candidateIndexRef = useRef(0);
   const activeUrlRef = useRef('');
+  const hasConnectedOnceRef = useRef(false);
   const {
     url,
     onConnect,
@@ -124,6 +124,7 @@ export function useWebRealtime(
       ws.onopen = () => {
         setIsConnected(true);
         reconnectAttemptsRef.current = 0;
+        hasConnectedOnceRef.current = true;
         onConnect?.();
         console.log(`✅ Connected to ${targetUrl}`);
       };
@@ -168,7 +169,9 @@ export function useWebRealtime(
         if (ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
           return;
         }
-        console.error('WebSocket error:', error);
+        if (hasConnectedOnceRef.current) {
+          console.warn('WebSocket transient error:', error);
+        }
         onError?.(`WebSocket error at ${targetUrl}`);
       };
 
@@ -177,7 +180,13 @@ export function useWebRealtime(
         setIsConnected(false);
         onDisconnect?.();
         if (shouldReconnectRef.current) {
-          console.log(`❌ Disconnected from ${targetUrl} (code=${event.code})`);
+          if (event.code === 1000) {
+            if (hasConnectedOnceRef.current) {
+              console.info(`ℹ️ WebSocket closed normally at ${targetUrl} (code=${event.code})`);
+            }
+          } else if (hasConnectedOnceRef.current) {
+            console.warn(`❌ Disconnected from ${targetUrl} (code=${event.code})`);
+          }
         }
 
         // Auto-reconnect
@@ -194,7 +203,8 @@ export function useWebRealtime(
               return;
             }
             const nextUrl = getCurrentUrl();
-            console.log(`🔄 Attempting to reconnect (${nextAttempt}) at ${nextUrl || activeUrlRef.current}...`);
+            const level = hasConnectedOnceRef.current ? console.info : () => undefined;
+            level(`🔄 Attempting to reconnect (${nextAttempt}) at ${nextUrl || activeUrlRef.current}...`);
             connect();
           }, interval);
         }

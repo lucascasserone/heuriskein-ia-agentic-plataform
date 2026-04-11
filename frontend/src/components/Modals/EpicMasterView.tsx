@@ -21,6 +21,24 @@ interface Epic {
   description?: string;
   priority: 'low' | 'medium' | 'high';
   status: 'backlog' | 'refinement' | 'approved' | 'completed' | 'failed';
+  complexity?: number | null;
+  lead_time?: string | null;
+  due_date?: string | null;
+  checklist_items?: Array<{
+    text: string;
+    agent_ready?: boolean;
+    critical?: boolean;
+    requires_validation?: boolean;
+  }>;
+  context_files?: Array<{
+    name?: string;
+    size?: number;
+    type?: string;
+  }>;
+  feedback?: Array<{
+    text?: string;
+    time?: string;
+  }>;
 }
 
 interface ChecklistItem {
@@ -43,7 +61,7 @@ export interface EpicMasterViewProps {
   /** null = create mode; Epic = edit mode */
   epic: Epic | null;
   onClose: () => void;
-  onSuccess?: () => void;
+  onSuccess?: (updatedEpic?: Epic) => void;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -163,6 +181,43 @@ export default function EpicMasterView({
       setDescription(epic.description ?? '');
       setPriority(epic.priority ?? 'medium');
       setStatus(epic.status ?? 'backlog');
+      setComplexity(
+        epic.complexity && FIBONACCI.includes(epic.complexity as FibValue)
+          ? (epic.complexity as FibValue)
+          : null,
+      );
+      setDueDate((epic.lead_time || epic.due_date || '').slice(0, 10));
+      setChecklist(
+        (epic.checklist_items || []).map((item, index) => ({
+          id: `${Date.now()}_${index}`,
+          text: item.text || '',
+          agentReady: Boolean(item.agent_ready),
+          critical: Boolean(item.critical),
+          requiresValidation: Boolean(item.requires_validation),
+        })),
+      );
+      setAttachments(
+        (epic.context_files || [])
+          .filter((file) => Boolean(file?.name))
+          .map((file, index) => ({
+            id: `${Date.now()}_ctx_${index}`,
+            name: file.name || `arquivo_${index + 1}`,
+            size: Number(file.size || 0),
+            type: file.type || 'application/octet-stream',
+          })),
+      );
+      setActivityLog(
+        (epic.feedback || [])
+          .filter((entry) => Boolean(entry?.text))
+          .map((entry, index) => ({
+            id: `${Date.now()}_fb_${index}`,
+            text: entry.text || '',
+            time: entry.time || new Date().toLocaleTimeString('pt-BR', {
+              hour: '2-digit',
+              minute: '2-digit',
+            }),
+          })),
+      );
     } else {
       setGoal('');
       setDescription('');
@@ -305,25 +360,35 @@ export default function EpicMasterView({
       };
       const base = {
         ...epicPayload,
-        ...(complexity !== null ? { complexity } : {}),
-        ...(dueDate ? { due_date: dueDate } : {}),
-        ...(checklist.length > 0
-          ? {
-              checklist_items: checklist.map((i) => ({
-                text: i.text,
-                agent_ready: i.agentReady,
-              })),
-            }
-          : {}),
+          complexity: complexity ?? null,
+          lead_time: dueDate || null,
+          checklist_items: checklist.map((i) => ({
+            text: i.text,
+            agent_ready: i.agentReady,
+            critical: Boolean(i.critical),
+            requires_validation: Boolean(i.requiresValidation),
+          })),
+          context_files: attachments.map((file) => ({
+            name: file.name,
+            size: file.size,
+            type: file.type,
+          })),
+          feedback: activityLog.map((entry) => ({
+            text: entry.text,
+            time: entry.time,
+          })),
       };
+      let savedEpic: Epic | undefined;
       if (isEdit && epic) {
-        await apiClient.updateEpic(epic.id, base);
+        const response = await apiClient.updateEpic(epic.id, base);
+        savedEpic = response.data as Epic;
       } else {
-        await apiClient.createEpic(base);
+        const response = await apiClient.createEpic(base);
+        savedEpic = response.data as Epic;
       }
       notify.success(isEdit ? 'Épica atualizada com sucesso!' : 'Épica criada com sucesso!');
       onClose();
-      onSuccess?.();
+      onSuccess?.(savedEpic);
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { error?: string } } })?.response?.data
