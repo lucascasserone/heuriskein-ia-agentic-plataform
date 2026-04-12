@@ -31,7 +31,7 @@ except ImportError:
     StateGraph = None
     HAS_LANGGRAPH = False
 
-from api.models import Agent, Epic, Task
+from api.models import Agent, ApprovalRequest, ClarificationRequest, Epic, Task
 from api.llm_service import get_llm_service
 from api.work_tracking import create_agent_handoff
 
@@ -91,6 +91,7 @@ class CompanyState(TypedDict):
     avg_resolution_minutes: float
     delegation_events: int
     agent_profiles: Dict[str, Dict[str, Any]]
+    route_decision: str
 
 
 @dataclass
@@ -767,7 +768,7 @@ def _node_route(state: CompanyState) -> CompanyState:
     decision = router.next_action(task)
     task["execution_logs"].append(f"{_utc_now()} - Router decision: {decision}")
     _append_trace(state, f"Router decidiu '{decision}' para task {task['id']} ({task['level']}).")
-    state["route_decision"] = decision  # type: ignore[typeddict-item]
+    state["route_decision"] = decision
     return state
 
 
@@ -1065,6 +1066,7 @@ class AutonomousOrganizationService:
             "avg_resolution_minutes": 0.0,
             "delegation_events": 0,
             "agent_profiles": {},
+            "route_decision": "",
         }
 
         result = self.graph.invoke(state)
@@ -1196,6 +1198,7 @@ class OrgMissionAPIView(APIView):
                 "avg_resolution_minutes": 0.0,
                 "delegation_events": 0,
                 "agent_profiles": {},
+                "route_decision": "",
             }
             return Response(
                 {
@@ -1213,6 +1216,96 @@ class OrgStateAPIView(APIView):
     def get(self, request):
         state = ORG_SERVICE.get_last_state()
         return Response({"state": state or {}}, status=status.HTTP_200_OK)
+
+
+class OrgMissionStatsAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        state = ORG_SERVICE.get_last_state() or {}
+        task_tree = state.get("task_tree") or {}
+        tasks = list(task_tree.values())
+
+        completed = sum(1 for task in tasks if task.get("status") in {"done", "approved"})
+        total = len(tasks)
+        success_rate = round((completed / total) * 100, 1) if total else 0.0
+
+        pending_approvals = ApprovalRequest.objects.filter(status="pending").count()
+        pending_clarifications = ClarificationRequest.objects.filter(status="pending").count()
+
+        queue_task = (
+            Task.objects.filter(status__in=["queue", "processing", "blocked", "review"]) 
+            .order_by("created_at")
+            .first()
+        )
+        queue_age_minutes = 0
+        if queue_task and queue_task.created_at:
+            delta = dj_timezone.now() - queue_task.created_at
+            queue_age_minutes = max(int(delta.total_seconds() // 60), 0)
+
+        active_agents = Agent.objects.exclude(state="idle").count()
+
+        payload = {
+            "status": "active" if total else "idle",
+            "successRate": success_rate,
+            "queueAge": queue_age_minutes,
+            "activeAgents": active_agents,
+            "approvingPending": pending_approvals,
+            "clarificationsNeeded": pending_clarifications,
+            "delegationEvents": int(state.get("delegation_events") or 0),
+            "estimatedTokens": int(state.get("estimated_tokens") or 0),
+        }
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class OrgCapabilitiesSummaryAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        state = ORG_SERVICE.get_last_state() or {}
+        task_tree = state.get("task_tree") or {}
+
+        active_agents = Agent.objects.count()
+        pending_approvals = ApprovalRequest.objects.filter(status="pending").count()
+
+        capabilities = [
+            {
+                "id": "agents",
+                "name": "Multi-Agent Collaboration",
+                "status": "active",
+                "metrics": {
+                    "agents": active_agents,
+                    "delegation_events": int(state.get("delegation_events") or 0),
+                },
+            },
+            {
+                "id": "approvals",
+                "name": "Approval Workflow",
+                "status": "active",
+                "metrics": {
+                    "pending": pending_approvals,
+                    "tasks_in_tree": len(task_tree),
+                },
+            },
+            {
+                "id": "knowledge",
+                "name": "Corporate Knowledge",
+                "status": "alpha",
+                "metrics": {
+                    "memory_hits": len(state.get("corporate_memory_hits") or []),
+                },
+            },
+            {
+                "id": "automation",
+                "name": "Playbooks & Automation",
+                "status": "alpha",
+                "metrics": {
+                    "epics": Epic.objects.count(),
+                    "tasks": Task.objects.count(),
+                },
+            },
+        ]
+        return Response({"capabilities": capabilities}, status=status.HTTP_200_OK)
 
 
 class OrgFeasibilityAPIView(APIView):

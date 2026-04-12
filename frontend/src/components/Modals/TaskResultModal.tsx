@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   ChevronRight,
   Clock3,
+  Download,
   FileText,
   GitBranch,
   ListChecks,
@@ -18,7 +19,7 @@ import {
   Sparkles,
   X,
 } from 'lucide-react';
-import { apiClient, AgentSummary, TaskWorkspaceResponse } from '@/lib/api';
+import { apiClient, AgentSummary, TaskArtifact, TaskWorkspaceResponse } from '@/lib/api';
 import { useNotify } from '@/lib/toast';
 
 interface TaskPreview {
@@ -95,6 +96,51 @@ function Section({ title, content }: { title: string; content?: string }) {
       </div>
     </section>
   );
+}
+
+function artifactFileName(artifact: TaskArtifact) {
+  const rawPath = (artifact.relative_path || '').trim();
+  if (rawPath) {
+    const segments = rawPath.split('/').filter(Boolean);
+    if (segments.length > 0) {
+      return segments[segments.length - 1];
+    }
+  }
+
+  const fallbackByType: Record<string, string> = {
+    diff: 'patch.txt',
+    report: 'report.md',
+    spec: 'spec.md',
+    log: 'execution.log',
+    snapshot: 'snapshot.json',
+    file_bundle: 'bundle.txt',
+    decision: 'decision.md',
+    test_result: 'test-result.txt',
+    document: 'document.md',
+  };
+
+  return fallbackByType[artifact.artifact_type] || 'artifact.txt';
+}
+
+function artifactDownloadBody(artifact: TaskArtifact) {
+  if (typeof artifact.content === 'string' && artifact.content.length > 0) {
+    return artifact.content;
+  }
+
+  const payload = artifact.payload;
+  if (payload && typeof payload === 'object') {
+    const candidate = (payload as Record<string, unknown>).new_content;
+    if (typeof candidate === 'string' && candidate.length > 0) {
+      return candidate;
+    }
+    return JSON.stringify(payload, null, 2);
+  }
+
+  if (typeof artifact.preview === 'string' && artifact.preview.length > 0) {
+    return artifact.preview;
+  }
+
+  return '';
 }
 
 export default function TaskResultModal({ isOpen, task, onClose, onRetry }: TaskResultModalProps) {
@@ -333,6 +379,28 @@ function toDateTimeLocal(value?: string | null) {
       notify.error(message);
     } finally {
       setArtifactActionId('');
+    }
+  };
+
+  const handleDownloadArtifact = (artifact: TaskArtifact) => {
+    try {
+      const body = artifactDownloadBody(artifact);
+      if (!body) {
+        notify.error('Artefato sem conteúdo para download.');
+        return;
+      }
+
+      const blob = new Blob([body], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = artifactFileName(artifact);
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
+    } catch {
+      notify.error('Não foi possível gerar o download do artefato.');
     }
   };
 
@@ -973,6 +1041,14 @@ function toDateTimeLocal(value?: string | null) {
                       </div>
 
                       <div className="mt-3 flex flex-wrap gap-2">
+                        <button
+                          onClick={() => handleDownloadArtifact(artifact)}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-primary/40 bg-primary/10 px-3 py-1.5 text-xs text-primary transition-colors hover:bg-primary/20"
+                        >
+                          <Download size={12} />
+                          <span>Baixar artefato</span>
+                        </button>
+
                         {artifact.artifact_type === 'diff' && artifact.status === 'proposed' && !pendingApproval && !approvedApproval && (
                           <button
                             onClick={() => handleRequestApproval(artifact.id, artifact.relative_path)}

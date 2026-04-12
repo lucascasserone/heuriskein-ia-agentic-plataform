@@ -17,6 +17,8 @@ from api.views import (
     AgentProvidersAPIView, ProviderCredentialsStatusAPIView, ProviderCredentialsUpsertAPIView,
 )
 from api.autonomous_org import (
+    OrgCapabilitiesSummaryAPIView,
+    OrgMissionStatsAPIView,
     OrgHireAPIView,
     OrgMissionAPIView,
     OrgStateAPIView,
@@ -51,6 +53,8 @@ urlpatterns = [
     path('api/v1/org/agents/template/', OrgTemplateAPIView.as_view(), name='org-agent-template'),
     path('api/v1/org/mission/execute/', OrgMissionAPIView.as_view(), name='org-run-mission'),
     path('api/v1/org/mission/feasibility/', OrgFeasibilityAPIView.as_view(), name='org-mission-feasibility'),
+    path('api/v1/org/mission/stats/', OrgMissionStatsAPIView.as_view(), name='org-mission-stats'),
+    path('api/v1/org/capabilities/summary/', OrgCapabilitiesSummaryAPIView.as_view(), name='org-capabilities-summary'),
     path('api/v1/org/state/', OrgStateAPIView.as_view(), name='org-state'),
     path('api/v1/auth/register/', RegisterAPIView.as_view(), name='register'),
     path('api/v1/auth/login/', LoginAPIView.as_view(), name='login'),

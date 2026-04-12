@@ -5,7 +5,7 @@ from django.contrib.auth.models import User
 from rest_framework.test import APIClient
 from unittest.mock import patch
 from api.models import Agent, Task, Epic, Artifact, TaskEvent, Subtask, ApprovalRequest, DecisionRecord
-from api.execution_engine import _extract_subtask_specs
+from api.execution_engine import _extract_file_change_plan, _extract_subtask_specs
 
 
 class AgentAPITest(TestCase):
@@ -73,6 +73,52 @@ class TaskAPITest(TestCase):
         }
         response = self.client.post('/api/v1/tasks/', data, format='json')
         self.assertEqual(response.status_code, 201)
+
+
+class ExecutionEngineFileChangeParsingTest(TestCase):
+    @patch('api.execution_engine.preview_file_change')
+    def test_extract_file_change_plan_accepts_language_fence(self, preview_mock):
+        preview_mock.return_value = {
+            'allowed': True,
+            'reason': 'ok',
+            'relative_path': 'docs/relatorio.md',
+            'diff': 'diff',
+        }
+
+        text = """
+[FILE_CHANGE: docs/relatorio.md]
+```python
+print('arquivo gerado')
+```
+[/FILE_CHANGE]
+"""
+
+        plan = _extract_file_change_plan('task-123', text)
+        self.assertEqual(len(plan), 1)
+        self.assertEqual(plan[0]['relative_path'], 'docs/relatorio.md')
+        self.assertIn("print('arquivo gerado')", plan[0]['new_content'])
+
+    @patch('api.execution_engine.preview_file_change')
+    def test_extract_file_change_plan_accepts_arquivo_alias(self, preview_mock):
+        preview_mock.return_value = {
+            'allowed': True,
+            'reason': 'ok',
+            'relative_path': 'output/result.txt',
+            'diff': 'diff',
+        }
+
+        text = """
+[ARQUIVO: output/result.txt]
+```content
+resultado final
+```
+[/ARQUIVO]
+"""
+
+        plan = _extract_file_change_plan('task-456', text)
+        self.assertEqual(len(plan), 1)
+        self.assertEqual(plan[0]['relative_path'], 'output/result.txt')
+        self.assertEqual(plan[0]['new_content'].strip(), 'resultado final')
 
     def test_execute_task(self):
         """Test executing a task"""

@@ -488,6 +488,28 @@ export interface CompanyStateResponse {
   }>;
 }
 
+export interface OrgMissionStatsResponse {
+  status: 'active' | 'idle';
+  successRate: number;
+  queueAge: number;
+  activeAgents: number;
+  approvingPending: number;
+  clarificationsNeeded: number;
+  delegationEvents: number;
+  estimatedTokens: number;
+}
+
+export interface OrgCapabilitySummaryItem {
+  id: 'agents' | 'approvals' | 'knowledge' | 'automation';
+  name: string;
+  status: 'active' | 'alpha';
+  metrics: Record<string, number>;
+}
+
+export interface OrgCapabilitiesSummaryResponse {
+  capabilities: OrgCapabilitySummaryItem[];
+}
+
 export interface FileChangePlanItem {
   allowed: boolean;
   reason: string;
@@ -611,6 +633,8 @@ export const apiClient: AxiosInstance & {
     constraints?: string[];
   }) => Promise<AxiosResponse<{ state: CompanyStateResponse }>>;
   getOrgState: () => Promise<AxiosResponse<{ state: CompanyStateResponse }>>;
+  getOrgMissionStats: () => Promise<AxiosResponse<OrgMissionStatsResponse>>;
+  getOrgCapabilitiesSummary: () => Promise<AxiosResponse<OrgCapabilitiesSummaryResponse>>;
   createTask: (payload: TaskPayload) => Promise<AxiosResponse<unknown>>;
   updateTask: (id: string, payload: Partial<TaskPayload>) => Promise<AxiosResponse<unknown>>;
   deleteTask: (id: string) => Promise<AxiosResponse<unknown>>;
@@ -783,6 +807,10 @@ export const apiClient: AxiosInstance & {
   runOrgMission: (payload) => client.post('/org/mission/execute/', payload),
 
   getOrgState: () => client.get('/org/state/'),
+
+  getOrgMissionStats: () => client.get('/org/mission/stats/'),
+
+  getOrgCapabilitiesSummary: () => client.get('/org/capabilities/summary/'),
 
   createTask: (payload: TaskPayload) => client.post('/tasks/', payload),
 

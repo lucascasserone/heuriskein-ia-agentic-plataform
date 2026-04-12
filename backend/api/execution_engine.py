@@ -569,22 +569,39 @@ def _parse_response(text: str) -> dict:
 
 def _extract_file_change_plan(task_id: str, text: str) -> list[dict]:
     """Parse FILE_CHANGE blocks and build non-destructive diff previews."""
-    pattern = re.compile(
-        r'\[FILE_CHANGE:\s*(.+?)\]\s*```(?:content)?\n(.*?)```\s*\[/FILE_CHANGE\]',
-        re.IGNORECASE | re.DOTALL,
-    )
-
     plan: list[dict] = []
-    for match in pattern.finditer(text):
-        relative_path = match.group(1).strip()
-        new_content = match.group(2)
-        preview = preview_file_change(
-            task_id=task_id,
-            relative_path=relative_path,
-            new_content=new_content,
-        )
-        preview['new_content'] = new_content
-        plan.append(preview)
+
+    # Accepts both expected FILE_CHANGE blocks and common variations that
+    # LLMs frequently produce (language fences, optional slash in closing tag,
+    # and Portuguese aliases ARQUIVO/ARQUIVO_CHANGE).
+    patterns = [
+        re.compile(
+            r'\[(?:FILE_CHANGE|ARQUIVO_CHANGE|ARQUIVO):\s*(.+?)\]\s*```[^\n]*\n(.*?)```\s*\[/?(?:FILE_CHANGE|ARQUIVO_CHANGE|ARQUIVO)\]',
+            re.IGNORECASE | re.DOTALL,
+        ),
+        re.compile(
+            r'\[(?:FILE_CHANGE|ARQUIVO_CHANGE|ARQUIVO):\s*(.+?)\]\s*(.*?)\s*\[/?(?:FILE_CHANGE|ARQUIVO_CHANGE|ARQUIVO)\]',
+            re.IGNORECASE | re.DOTALL,
+        ),
+    ]
+
+    seen: set[tuple[str, str]] = set()
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            relative_path = match.group(1).strip()
+            new_content = match.group(2)
+            dedupe_key = (relative_path, new_content)
+            if not relative_path or dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+
+            preview = preview_file_change(
+                task_id=task_id,
+                relative_path=relative_path,
+                new_content=new_content,
+            )
+            preview['new_content'] = new_content
+            plan.append(preview)
 
     return plan
 
