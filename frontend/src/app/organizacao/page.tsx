@@ -280,7 +280,7 @@ export default function OrganizacaoAutonomaPage() {
     const intervalId = window.setInterval(() => {
       loadDbAgents();
         loadMissionStats();
-    }, 15000);
+    }, 30000);
 
     const onFocus = () => loadDbAgents();
     window.addEventListener('focus', onFocus);
@@ -343,7 +343,7 @@ export default function OrganizacaoAutonomaPage() {
     };
 
     loadTraffic();
-    const intervalId = window.setInterval(loadTraffic, 15000);
+    const intervalId = window.setInterval(loadTraffic, 30000);
 
     return () => {
       cancelled = true;

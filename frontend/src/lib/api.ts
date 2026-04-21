@@ -607,6 +607,7 @@ export const apiClient: AxiosInstance & {
   getWorkflowRuns: () => Promise<AxiosResponse<WorkflowRunItem[]>>;
   getEpics: () => Promise<AxiosResponse<unknown>>;
   getEpicsByStatus: () => Promise<AxiosResponse<unknown>>;
+  getEpic: (id: string) => Promise<AxiosResponse<unknown>>;
   createEpic: (payload: EpicPayload) => Promise<AxiosResponse<unknown>>;
   updateEpic: (id: string, payload: Partial<EpicPayload>) => Promise<AxiosResponse<unknown>>;
   deleteEpic: (id: string) => Promise<AxiosResponse<unknown>>;
@@ -783,6 +784,8 @@ export const apiClient: AxiosInstance & {
   getEpics: () => client.get('/epics/'),
 
   getEpicsByStatus: () => client.get('/epics/by_status/'),
+
+  getEpic: (id: string) => client.get(`/epics/${id}/`),
 
   createEpic: (payload: EpicPayload) => client.post('/epics/', payload),
 

@@ -51,8 +51,8 @@ export default function DualKanban() {
 
   useEffect(() => {
     fetchData();
-    // Poll for updates every 5 seconds
-    const interval = setInterval(fetchData, 5000);
+    // Poll for updates every 30 seconds (WebSocket handles real-time updates)
+    const interval = setInterval(fetchData, 30000);
     return () => clearInterval(interval);
   }, []);
 

@@ -105,7 +105,7 @@ export default function Sidebar({ collapsed = false, onToggleCollapse }: Sidebar
     };
 
     loadAgents();
-    const interval = window.setInterval(loadAgents, 15000);
+    const interval = window.setInterval(loadAgents, 30000);
     return () => window.clearInterval(interval);
   }, []);
 

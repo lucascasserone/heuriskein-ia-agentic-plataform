@@ -169,26 +169,44 @@ export default function EpicMasterView({
   const [feasibility, setFeasibility] = useState<number | null>(null);
   const [complexityHovered, setComplexityHovered] = useState<FibValue | null>(null);
   const [isRoadmapOpen, setIsRoadmapOpen] = useState(true);
+  const [freshEpic, setFreshEpic] = useState<Epic | null>(null);
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const descriptionRef = useRef<HTMLTextAreaElement | null>(null);
 
+  // ── Fetch fresh data from API when opening in edit mode ────────────────────
+  useEffect(() => {
+    if (!isOpen || !epic?.id) {
+      setFreshEpic(null);
+      return;
+    }
+    let cancelled = false;
+    apiClient.getEpic(epic.id).then((res) => {
+      if (!cancelled) setFreshEpic(res.data as Epic);
+    }).catch(() => {
+      if (!cancelled) setFreshEpic(epic); // fallback to prop
+    });
+    return () => { cancelled = true; };
+  }, [isOpen, epic?.id]);
+
   // ── Populate on open ────────────────────────────────────────────────────────
   useEffect(() => {
     if (!isOpen) return;
-    if (epic) {
-      setGoal(epic.goal ?? '');
-      setDescription(epic.description ?? '');
-      setPriority(epic.priority ?? 'medium');
-      setStatus(epic.status ?? 'backlog');
+    // In edit mode, wait for fresh data; in create mode use empty defaults
+    const source = freshEpic ?? epic;
+    if (source) {
+      setGoal(source.goal ?? '');
+      setDescription(source.description ?? '');
+      setPriority(source.priority ?? 'medium');
+      setStatus(source.status ?? 'backlog');
       setComplexity(
-        epic.complexity && FIBONACCI.includes(epic.complexity as FibValue)
-          ? (epic.complexity as FibValue)
+        source.complexity && FIBONACCI.includes(source.complexity as FibValue)
+          ? (source.complexity as FibValue)
           : null,
       );
-      setDueDate((epic.lead_time || epic.due_date || '').slice(0, 10));
+      setDueDate((source.lead_time || source.due_date || '').slice(0, 10));
       setChecklist(
-        (epic.checklist_items || []).map((item, index) => ({
+        (source.checklist_items || []).map((item, index) => ({
           id: `${Date.now()}_${index}`,
           text: item.text || '',
           agentReady: Boolean(item.agent_ready),
@@ -197,7 +215,7 @@ export default function EpicMasterView({
         })),
       );
       setAttachments(
-        (epic.context_files || [])
+        (source.context_files || [])
           .filter((file) => Boolean(file?.name))
           .map((file, index) => ({
             id: `${Date.now()}_ctx_${index}`,
@@ -207,7 +225,7 @@ export default function EpicMasterView({
           })),
       );
       setActivityLog(
-        (epic.feedback || [])
+        (source.feedback || [])
           .filter((entry) => Boolean(entry?.text))
           .map((entry, index) => ({
             id: `${Date.now()}_fb_${index}`,
@@ -230,7 +248,7 @@ export default function EpicMasterView({
       setActivityLog([]);
     }
     setFeasibility(null);
-  }, [epic, isOpen]);
+  }, [freshEpic, isOpen]);
 
   // ── Debounced feasibility score ─────────────────────────────────────────────
   useEffect(() => {

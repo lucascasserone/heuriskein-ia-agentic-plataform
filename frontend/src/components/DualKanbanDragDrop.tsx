@@ -200,7 +200,7 @@ export default function DualKanbanDragDrop() {
     };
 
     window.addEventListener('kanban:refresh', refreshHandler);
-    const interval = window.setInterval(refreshHandler, 15000);
+    const interval = window.setInterval(refreshHandler, 30000);
 
     return () => {
       window.removeEventListener('kanban:refresh', refreshHandler);
@@ -222,13 +222,13 @@ export default function DualKanbanDragDrop() {
     };
   }, []);
 
-  // Fast poll (every 4 s) while any task is processing
+  // Fast poll (every 15 s) while any task is processing AND WebSocket is not connected
   useEffect(() => {
     const hasProcessing = Object.values(tasks).flat().some((t) => t.status === 'processing');
-    if (!hasProcessing) return;
-    const fastPoll = window.setInterval(fetchData, 4000);
+    if (!hasProcessing || taskRealtime.isConnected) return;
+    const fastPoll = window.setInterval(fetchData, 15000);
     return () => window.clearInterval(fastPoll);
-  }, [tasks]);
+  }, [tasks, taskRealtime.isConnected]);
 
   const withTimeout = async <T,>(promise: Promise<T>, ms: number): Promise<T> => {
     return new Promise<T>((resolve, reject) => {

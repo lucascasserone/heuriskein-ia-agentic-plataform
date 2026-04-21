@@ -50,7 +50,7 @@ export default function AgentPanel() {
     };
 
     fetchAgents();
-    const interval = setInterval(fetchAgents, 7000);
+    const interval = setInterval(fetchAgents, 30000);
 
     return () => clearInterval(interval);
   }, [setAgents]);
