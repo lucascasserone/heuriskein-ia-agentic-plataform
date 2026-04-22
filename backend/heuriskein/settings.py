@@ -78,7 +78,15 @@ database_url = config('DATABASE_URL', default='')
 if database_url.startswith('postgresql') or database_url.startswith('postgres'):
     parsed = urlparse(database_url)
     query = parse_qs(parsed.query)
-    sslmode = query.get('sslmode', [None])[0]
+    # Render/Postgres commonly requires SSL. Priority:
+    # 1) sslmode in DATABASE_URL query
+    # 2) DB_SSLMODE env var
+    # 3) require in non-debug environments
+    sslmode = (
+        query.get('sslmode', [None])[0]
+        or config('DB_SSLMODE', default='require' if not DEBUG else '')
+        or None
+    )
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.postgresql',
