@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 from decouple import AutoConfig, Csv
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, parse_qs
 
 # Build paths inside the project
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -77,14 +77,18 @@ database_url = config('DATABASE_URL', default='')
 
 if database_url.startswith('postgresql') or database_url.startswith('postgres'):
     parsed = urlparse(database_url)
+    query = parse_qs(parsed.query)
+    sslmode = query.get('sslmode', [None])[0]
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.postgresql',
-            'NAME': config('DB_NAME', default=(parsed.path or '/heuriskein_db').lstrip('/')),
-            'USER': config('DB_USER', default=unquote(parsed.username or 'postgres')),
-            'PASSWORD': config('DB_PASSWORD', default=unquote(parsed.password or 'postgres')),
-            'HOST': config('DB_HOST', default=parsed.hostname or 'localhost'),
-            'PORT': config('DB_PORT', default=str(parsed.port or '5432')),
+            # Use DATABASE_URL as single source of truth in production.
+            'NAME': (parsed.path or '/heuriskein_db').lstrip('/'),
+            'USER': unquote(parsed.username or 'postgres'),
+            'PASSWORD': unquote(parsed.password or 'postgres'),
+            'HOST': parsed.hostname or 'localhost',
+            'PORT': str(parsed.port or '5432'),
+            **({'OPTIONS': {'sslmode': sslmode}} if sslmode else {}),
         }
     }
 else:
